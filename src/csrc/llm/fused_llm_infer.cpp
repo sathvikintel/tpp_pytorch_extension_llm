@@ -1363,6 +1363,93 @@ struct __attribute__((visibility("hidden"))) Qwen2DecoderLayer : LLMBlock {
         t_inp, t_cache, use_cache);
   }
 
+    void log_event_counter_results(perf::EventCounter& event_counter, const std::string& section_name, const std::string& log_file_path = "/home/sathvik/tpp-pytorch-extension/llm_perf_stats.log")
+{
+    // Stop the event counter to finalize counting
+    event_counter.stop();
+
+    // Open log file in append mode
+    std::ofstream logfile(log_file_path, std::ios::app);
+    if (!logfile.is_open())
+    {
+        std::cerr << "Error: Unable to open log file: " << log_file_path << std::endl;
+        return;  // Or throw exception if preferred
+    }
+
+    logfile << std::endl;
+    logfile << section_name << std::endl;
+
+    // Retrieve results: assuming result() returns a container of pairs (event_name, value)
+    const auto result = event_counter.result();
+
+    for (const auto& [event_name, value] : result)
+    {
+        logfile << event_name << ": " << value << std::endl;
+    }
+
+    logfile.close();
+}
+
+size_t getCurrentRSS() {
+  std::ifstream statm("/proc/self/statm");
+  if (!statm.is_open()) {
+      return 0;
+  }
+  size_t size, rss;
+  statm >> size >> rss;
+  statm.close();
+
+  return rss * sysconf(_SC_PAGESIZE);
+}
+
+
+// Helper: Write tensor info to log
+inline void log_tensor_info(const at::Tensor& t, const std::string& name = "") {
+  if (!t.defined()) return;
+  std::ofstream log("/home/sathvik/tpp-pytorch-extension/llm_gemm_phase_mem_usage.log", std::ios_base::app);
+  // if (log.is_open()) {
+  //     log << (name.empty() ? "" : (name + ": "))
+  //         << "address=" << static_cast<const void*>(t.data_ptr())
+  //         << ", nbytes=" << t.nbytes() << std::endl;
+  //     log.close();
+  // }
+}
+
+// Scaling factor for total bytes
+double kTotalBytesScale = 1.0;
+
+// Overload for at::Tensor
+inline std::pair<size_t, void*> get_total_nbytes(const at::Tensor& t, const std::string& name = "") {
+    if (t.defined()) {
+        at::Tensor contig_t = t.contiguous();
+        void* header_addr = static_cast<void*>(contig_t.data_ptr());
+        size_t nbytes = contig_t.nbytes();
+        size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+        dump_tensor_address_range(header_addr, scaled_nbytes); // <-- Log address range
+        return std::make_pair(scaled_nbytes, header_addr);
+    }
+    return std::make_pair(0, nullptr);
+}
+
+inline std::pair<size_t, void*> get_total_nbytes(const std::vector<at::Tensor>& v, const std::string& name = "") {
+    size_t total = 0;
+    void* first_addr = nullptr;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i].defined()) {
+            at::Tensor contig_t = v[i].contiguous();
+            void* header_addr = static_cast<void*>(contig_t.data_ptr());
+            size_t nbytes = contig_t.nbytes();
+            size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+            dump_tensor_address_range(header_addr, scaled_nbytes); // Pass scaled nbytes
+            if (!first_addr) first_addr = header_addr;
+            total += nbytes;
+        }
+    }
+    size_t scaled_total = static_cast<size_t>(total * kTotalBytesScale);
+    return std::make_pair(scaled_total, first_addr);
+}
+
+
   template <typename T>
   std::vector<at::Tensor> _forward(
       std::vector<at::Tensor>& t_inp,
