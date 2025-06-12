@@ -1,0 +1,20 @@
+# ninja log v6
+2	908	1749689522011683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/common_loops.o	3783c17ebf6cd601
+4	26443	1749689522013683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/init.o	2fb5af09da4acad7
+6	27365	1749689522015683507	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/xsmm.o	173f243ca4a7253d
+6	27685	1749689522015683507	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/shm_coll.o	5e9f1b0c0e075b73
+2	29053	1749689522011683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/dlrm/embbag.o	8318790229ec61ea
+6	29764	1749689522015683507	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/qtypes.o	e68032f03d2f4108
+3	31418	1749689522012683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/gnn/common/gnn_utils.o	be375ec4bf07b935
+5	31817	1749689522014683507	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/optim.o	aef0bb578e9bb7e2
+2	32799	1749689522011683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/dlrm/mlp.o	b810140dc6fb5462
+3	34303	1749689522012683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/dlrm/perceptron.o	2076978e18de65b9
+4	34738	1749689522013683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/gnn/graphsage/fused_gsage.o	49e0ca098ef49b4e
+0	36275	1749689522009683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/alphafold/Alpha_Attention.o	541c49500067524b
+3	37530	1749689522012683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/gnn/common/fused_ops.o	76eb46349aeccd62
+1	38799	1749689522010683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/bert/infer/fused_bert.o	d49477772fbaa00
+4	40226	1749689522013683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/gnn/gat/fused_gat.o	2b0984188a21e2d2
+1	41135	1749689522010683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/bert/pad/fused_bert.o	d5b1df00b57fd93c
+5	41551	1749689522014683507	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/llm/attn.o	4819f77ddf3bcc3a
+1	53362	1749689522010683506	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/bert/unpad/fused_bert.o	31d94c59b1e1fd61
+5	172835	1749689522014683507	/data/sathvik/tpp-pytorch-extension/build/temp.linux-x86_64-cpython-39/src/csrc/llm/fused_llm_infer.o	3b34e781c2bc91f2

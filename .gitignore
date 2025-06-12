@@ -1,0 +1,8 @@
+miniforge3/
+Miniforge3-Linux-x86_64.sh
+libxsmm/
+parlooper/
+_C.cpython-39-x86_64-linux-gnu.so
+*.o
+*.so
+build/
