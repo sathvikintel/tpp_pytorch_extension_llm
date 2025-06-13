@@ -1156,7 +1156,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
   }
 
     // Helper functions to dump tensor data
-  inline void dump_tensor_address_range(void* start, size_t nbytes, const std::string& log_file = "/data/sathvik/tpp-pytorch-extension/log_files/llm_mem_region_migrate.log") {
+  inline void dump_tensor_address_range(void* start, size_t nbytes, const std::string& log_file = "/data/sathvik/tpp-pytorch-extension/tier_infer/llm_mem_region_migrate.log") {
     uintptr_t start_addr = reinterpret_cast<uintptr_t>(start);
     uintptr_t end_addr = start_addr + nbytes;
     if (start_addr == 0 && end_addr == 0) return; 

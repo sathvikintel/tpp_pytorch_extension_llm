@@ -1,0 +1,77 @@
+RMS1
+instructions: 0.0
+cycles: 0.0
+cpu_clk_unhalted.pause: 0.0
+L1-dcache-loads: 0.0
+L1-dcache-load-misses: 0.0
+LLC-loads: 0.0
+LLC-load-misses: 0.0
+LLC-stalls: 0.0
+nanoseconds: 0.0
+
+Fused QKV computation
+instructions: 0.0
+cycles: 0.0
+cpu_clk_unhalted.pause: 0.0
+L1-dcache-loads: 0.0
+L1-dcache-load-misses: 0.0
+LLC-loads: 0.0
+LLC-load-misses: 0.0
+LLC-stalls: 0.0
+nanoseconds: 0.0
+
+MHA
+instructions: 0.0
+cycles: 0.0
+cpu_clk_unhalted.pause: 0.0
+L1-dcache-loads: 0.0
+L1-dcache-load-misses: 0.0
+LLC-loads: 0.0
+LLC-load-misses: 0.0
+LLC-stalls: 0.0
+nanoseconds: 0.0
+
+Post-Attention residual
+instructions: 0.0
+cycles: 0.0
+cpu_clk_unhalted.pause: 0.0
+L1-dcache-loads: 0.0
+L1-dcache-load-misses: 0.0
+LLC-loads: 0.0
+LLC-load-misses: 0.0
+LLC-stalls: 0.0
+nanoseconds: 0.0
+
+RMS2
+instructions: 0.0
+cycles: 0.0
+cpu_clk_unhalted.pause: 0.0
+L1-dcache-loads: 0.0
+L1-dcache-load-misses: 0.0
+LLC-loads: 0.0
+LLC-load-misses: 0.0
+LLC-stalls: 0.0
+nanoseconds: 0.0
+
+FFN
+instructions: 0.0
+cycles: 0.0
+cpu_clk_unhalted.pause: 0.0
+L1-dcache-loads: 0.0
+L1-dcache-load-misses: 0.0
+LLC-loads: 0.0
+LLC-load-misses: 0.0
+LLC-stalls: 0.0
+nanoseconds: 0.0
+
+Post-MLP residual
+instructions: 0.0
+cycles: 0.0
+cpu_clk_unhalted.pause: 0.0
+L1-dcache-loads: 0.0
+L1-dcache-load-misses: 0.0
+LLC-loads: 0.0
+LLC-load-misses: 0.0
+LLC-stalls: 0.0
+nanoseconds: 0.0
+

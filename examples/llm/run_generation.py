@@ -7,6 +7,9 @@ import os
 import inspect
 from accelerate import init_empty_weights
 from typing import Tuple
+import hashlib
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
 
 from transformers import (
     # pipeline,
@@ -68,9 +71,9 @@ parser.add_argument(
 parser.add_argument(
     "--weight-dtype",
     type=str,
-    choices=["float32", "bfloat16", "bfloat8", "hfloat8", "mxfp4", "qint8", None],
+    choices=["float32", "bfloat16", "bfloat8", "hfloat8", None],
     default=None,
-    help="bfloat16, float32 or bfloat8 or hfloat8 or mxfp4 or qint8",
+    help="bfloat16, float32 or bfloat8 or hfloat8",
 )
 parser.add_argument(
     "--input-tokens",
@@ -84,6 +87,13 @@ parser.add_argument(
 parser.add_argument(
     "--prompt", default=None, type=str, help="input prompt for self-defined if needed"
 )
+parser.add_argument(
+    '--summary-file',
+    type=str,
+    default=None,
+    help='Path to a summary file to write summary statistics'
+)
+
 parser.add_argument("--greedy", action="store_true")
 parser.add_argument("--ipex", action="store_true")
 parser.add_argument("--use-tpp", action="store_true")
@@ -100,6 +110,7 @@ parser.add_argument("--load-sharded-model", action="store_true")
 parser.add_argument("--save-sharded-model", action="store_true")
 args = parser.parse_args()
 print(args)
+summary_file = args.summary_file
 
 my_rank = 0
 my_size = 1
@@ -153,6 +164,148 @@ def dist_init():
 
 
 orig_print = print
+
+def print_model_parameters(model, log_file="llama_weight_params_info.log"):
+    from prettytable import PrettyTable
+
+    GB_DIV = 1024 ** 3  # Number of bytes in a GB
+
+    table = PrettyTable(["Parameter Name", "Shape", "Trainable", "Dtype", "Size (GB)"])
+    total_params = 0
+    trainable_params = 0
+    total_size_bytes = 0
+    trainable_size_bytes = 0
+
+    for name, param in model.named_parameters():
+        param_count = param.numel()
+        size_bytes = param_count * param.element_size()  # Calculate memory usage
+        size_gb = size_bytes / GB_DIV
+
+        table.add_row([
+            name,
+            list(param.shape),
+            param.requires_grad,
+            str(param.dtype).replace("torch.", ""),
+            f"{size_gb:.4f}"
+        ])
+
+        total_params += param_count
+        total_size_bytes += size_bytes
+        if param.requires_grad:
+            trainable_params += param_count
+            trainable_size_bytes += size_bytes
+
+    total_size_gb = total_size_bytes / GB_DIV
+
+    # Prepare output
+    output = "\nModel Parameters:\n"
+    output += str(table)
+    output += f"\n\nSum of all parameter sizes: {total_size_gb:.4f} GB\n"
+
+    print(output)
+
+    # Optionally, write to log file
+    with open(log_file, "w") as f:
+        f.write(output)
+
+
+
+
+
+def dump_tensor_address_ranges(model, log_file="llm_mem_region_migrate.log"):
+    """
+    Variables that need to be moved to HBM
+    """
+    code_to_weight = {
+        # "t_Gi": "input_layernorm.weight",
+
+        # "t_Wq": "self_attn.q_proj.weight",
+        # "t_Wk": "self_attn.k_proj.weight",
+        # "t_Wv": "self_attn.v_proj.weight",
+
+        # "t_Wp":  "self_attn.o_proj.weight",
+
+        # "t_Gpa": "post_attention_layernorm.weight",
+        # "t_Wg":  "mlp.gate_proj.weight",
+        # "t_Wu":  "mlp.up_proj.weight",
+
+        # "t_Wd": "mlp.down_proj.weight"
+    }
+
+    # Find the number of layers by scanning parameter names
+    layer_indices = set()
+    for name, _ in model.named_parameters():
+        if name.startswith("model.layers."):
+            try:
+                idx = int(name.split(".")[2])
+                layer_indices.add(idx)
+            except Exception:
+                continue
+    layer_indices = sorted(layer_indices)
+
+    with open(log_file, "w") as f:
+        for layer_idx in layer_indices:
+            for alias, short_name in code_to_weight.items():
+                param_name = f"model.layers.{layer_idx}.{short_name}"
+                for name, param in model.named_parameters():
+                    if name == param_name:
+                        # Ensure param is on CPU and contiguous
+                        param = param.detach().cpu().contiguous()
+                        start_addr = param.data_ptr()
+                        end_addr = start_addr + param.numel() * param.element_size()
+                        if(not(start_addr == 0 and end_addr == 0)):
+                            f.write(f"0x{start_addr:x}-0x{end_addr:x}\n")
+                        break  # Only one match per param_name
+
+    print(f"Address ranges written to: {log_file}")
+
+def write_kv_cache_size(pkv, summary_file):
+    """
+    Computes the total size of the KV cache (pkv) and writes a detailed report to summary_file.
+    Args:
+        pkv: The past_key_values tuple (as returned by model.generate(...))
+        summary_file: Path to the file to write the report to
+    """
+
+    total_bytes = 0
+    report_lines = []
+    # report_lines.append("KV Cache Size Report\n")
+    # report_lines.append(f"{'Layer':<8} {'Tensor':<8} {'Shape':<30} {'Dtype':<10} {'Size (MB)':>12}")
+
+    def handle_tensor(tensor, layer_idx, tensor_idx, subidx=None):
+        nonlocal total_bytes
+        numel = tensor.numel()
+        elem_size = tensor.element_size()
+        tensor_bytes = numel * elem_size
+        total_bytes += tensor_bytes
+        size_mb = tensor_bytes / (1024 * 1024)
+        idx_str = f"{tensor_idx}" if subidx is None else f"{tensor_idx}.{subidx}"
+        # report_lines.append(
+        #     f"{layer_idx:<8} {idx_str:<8} {str(list(tensor.shape)):<30} {str(tensor.dtype):<10} {size_mb:12.4f}"
+        # )
+
+    for layer_idx, layer_past in enumerate(pkv):
+        for tensor_idx, tensor in enumerate(layer_past):
+            if isinstance(tensor, torch.Tensor):
+                handle_tensor(tensor, layer_idx, tensor_idx)
+            elif isinstance(tensor, (tuple, list)):
+                for subidx, subtensor in enumerate(tensor):
+                    if isinstance(subtensor, torch.Tensor):
+                        handle_tensor(subtensor, layer_idx, tensor_idx, subidx)
+                    # else: skip non-tensor
+            # else: skip non-tensor
+
+    total_mb = total_bytes / (1024 * 1024)
+    total_gb = total_bytes / (1024 ** 3)
+    report_lines.append(f"\nTotal KV cache size:  {total_gb:.6f} GB")
+
+    try:
+        with open(summary_file, "a") as f:
+            for line in report_lines:
+                f.write(line + "\n")
+        print(f"KV cache size report written to: {summary_file}")
+    except Exception as e:
+        print(f"Error writing KV cache size report: {e}")
 
 
 def print_rank0(*args, **kwargs):
@@ -208,6 +361,10 @@ if not args.load_sharded_model:
     model = model.eval().to(device)
 model = model.to(memory_format=torch.channels_last)
 
+dump_tensor_address_ranges(model)
+
+print_model_parameters(model)
+
 # to hpu graph
 if args.device == "hpu":
     model = ht.hpu.wrap_in_hpu_graph(model)
@@ -217,8 +374,7 @@ if args.ipex:
 
 if args.use_tpp:
     dist_init()
-    # weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
-    weight_dtype = args.weight_dtype
+    weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
     if args.tpp_no_opt:
         # use tpp only to print first and 2nd token latencies
         pass
@@ -249,12 +405,6 @@ if args.use_tpp:
         from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
 
         OptimizeModelForLlama(
-            model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
-        )
-    elif model.config.architectures[0] == "Qwen2ForCausalLM":
-        from tpp_pytorch_extension.llm.fused_qwen2_infer import OptimizeModelForQwen2
-
-        OptimizeModelForQwen2(
             model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
         )
     else:
@@ -336,6 +486,7 @@ if args.use_tpp:
             model,
             tokenizer,
             generate_kwargs["num_beams"],
+            indirect_kv=True,
             enable_profile=cpp_profile,
             only_last_logit=True,
         )
@@ -373,7 +524,7 @@ if tokenizer.pad_token == "":
 tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
-output_past_key_values = False
+output_past_key_values = True
 if args.use_tpp and output_past_key_values == True:
     generate_kwargs["output_past_key_values"] = True
 else:
@@ -403,6 +554,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
     dtype=amp_dtype if amp_enabled else None,
 ):
     for i in range(num_iter):
+        print(f"Iteration number: {i+1}, total_time = {total_time} ")
         tic = time.time()
         inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(device)
         # inputs = tokenizer(prompt, return_tensors="pt", padding=False).to(device)
@@ -414,6 +566,8 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         )
         if output_past_key_values == True:
             output, pkv = output
+            write_kv_cache_size(pkv, summary_file)
+
         gen_ids = output[0] if args.token_latency else output
         gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         if args.device == "xpu":
@@ -441,21 +595,23 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
                     flush=True,
                 )
 
+with open(summary_file, 'a') as f:
+    f.write("\n" + "-" * 10 + " Summary: " + "-" * 10 + "\n")
+    latency = total_time / (num_iter - num_warmup)
+    f.write(f"Total time = {total_time}\n")
+    f.write("Inference latency: %.3f sec.\n" % latency)
+    if args.token_latency:
+        import numpy as np
+        from itertools import chain
 
-print("\n", "-" * 10, "Summary:", "-" * 10)
-latency = total_time / (num_iter - num_warmup)
-print("Inference latency: %.3f sec." % latency)
-if args.token_latency:
-    import numpy as np
-    from itertools import chain
+        first_latency = np.mean([x[0] for x in total_list])
+        average_2n = list(chain(*[x[1:] for x in total_list]))
+        average_2n.sort()
+        average_2n_latency = np.mean(average_2n)
+        p90_latency = average_2n[int(len(average_2n) * 0.9)]
+        p99_latency = average_2n[int(len(average_2n) * 0.99)]
+        f.write("First token average latency: %.3f sec.\n" % first_latency)
+        f.write("Average 2... latency: %.4f sec.\n" % average_2n_latency)
+        f.write("P90 2... latency: %.4f sec.\n" % p90_latency)
+        f.write("P99 2... latency: %.4f sec.\n" % p99_latency)
 
-    first_latency = np.mean([x[0] for x in total_list])
-    average_2n = list(chain(*[x[1:] for x in total_list]))
-    average_2n.sort()
-    average_2n_latency = np.mean(average_2n)
-    p90_latency = average_2n[int(len(average_2n) * 0.9)]
-    p99_latency = average_2n[int(len(average_2n) * 0.99)]
-    print("First token average latency: %.3f sec." % first_latency)
-    print("Average 2... latency: %.4f sec." % average_2n_latency)
-    print("P90 2... latency: %.4f sec." % p90_latency)
-    print("P99 2... latency: %.4f sec." % p99_latency)

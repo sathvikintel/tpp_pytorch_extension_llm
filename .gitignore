@@ -8,3 +8,5 @@ _C.cpython-39-x86_64-linux-gnu.so
 *.so
 build/
 scripts/
+tier_infer/
+eval_/
