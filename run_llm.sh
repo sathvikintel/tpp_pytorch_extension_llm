@@ -131,19 +131,19 @@ MSHR_COUNTERS="l1d_pend_miss.pending,l1d_pend_miss.pending_cycles,offcore_reques
 
 touch $bw_log_file
 initial_time=$(date +%s)
-output_file="utc_start_time.txt"
+output_file="log_files/utc_start_time.txt"
 touch "scripts/rss_log"
 > scripts/rss_log
 
 > $output_file
-> log_lines.txt
-> llm_events.log 
-> kv_layer_addr.log
-> call_stack.log
-> llm_perf_stats.log 
-> llm_gemm_phase_mem_usage.log
-> llm_mem_migrate_daemon_status.log
-> llm_mem_region_migrate.log
+> log_files/log_lines.txt
+> log_files/llm_events.log 
+> log_files/kv_layer_addr.log
+> log_files/call_stack.log
+> log_files/llm_perf_stats.log 
+> log_files/llm_gemm_phase_mem_usage.log
+> tier_infer/llm_mem_migrate_daemon_status.log
+> tier_infer/llm_mem_region_migrate.log
 
 # Check and set the LD_PRELOAD based on the allocator variable
 if [ "$ALLOCATOR" == "tcmalloc" ]; then

@@ -165,7 +165,7 @@ def dist_init():
 
 orig_print = print
 
-def print_model_parameters(model, log_file="llama_weight_params_info.log"):
+def print_model_parameters(model, log_file="log_files/llama_weight_params_info.log"):
     from prettytable import PrettyTable
 
     GB_DIV = 1024 ** 3  # Number of bytes in a GB
@@ -212,7 +212,7 @@ def print_model_parameters(model, log_file="llama_weight_params_info.log"):
 
 
 
-def dump_tensor_address_ranges(model, log_file="llm_mem_region_migrate.log"):
+def dump_tensor_address_ranges(model, log_file="log_files/llm_mem_region_migrate.log"):
     """
     Variables that need to be moved to HBM
     """
@@ -267,6 +267,8 @@ def write_kv_cache_size(pkv, summary_file):
         summary_file: Path to the file to write the report to
     """
 
+    import torch
+
     total_bytes = 0
     report_lines = []
     # report_lines.append("KV Cache Size Report\n")
@@ -285,15 +287,19 @@ def write_kv_cache_size(pkv, summary_file):
         # )
 
     for layer_idx, layer_past in enumerate(pkv):
-        for tensor_idx, tensor in enumerate(layer_past):
-            if isinstance(tensor, torch.Tensor):
-                handle_tensor(tensor, layer_idx, tensor_idx)
-            elif isinstance(tensor, (tuple, list)):
-                for subidx, subtensor in enumerate(tensor):
-                    if isinstance(subtensor, torch.Tensor):
-                        handle_tensor(subtensor, layer_idx, tensor_idx, subidx)
-                    # else: skip non-tensor
-            # else: skip non-tensor
+        if isinstance(layer_past, (list, tuple)):
+            for tensor_idx, tensor in enumerate(layer_past):
+                if isinstance(tensor, torch.Tensor):
+                    handle_tensor(tensor, layer_idx, tensor_idx)
+                elif isinstance(tensor, (tuple, list)):
+                    for subidx, subtensor in enumerate(tensor):
+                        if isinstance(subtensor, torch.Tensor):
+                            handle_tensor(subtensor, layer_idx, tensor_idx, subidx)
+                        # else: skip non-tensor
+                # else: skip non-tensor
+        elif isinstance(layer_past, torch.Tensor):
+            handle_tensor(layer_past, layer_idx, 0)
+        # else: skip non-tensor/non-iterable
 
     total_mb = total_bytes / (1024 * 1024)
     total_gb = total_bytes / (1024 ** 3)
@@ -306,6 +312,7 @@ def write_kv_cache_size(pkv, summary_file):
         print(f"KV cache size report written to: {summary_file}")
     except Exception as e:
         print(f"Error writing KV cache size report: {e}")
+
 
 
 def print_rank0(*args, **kwargs):
