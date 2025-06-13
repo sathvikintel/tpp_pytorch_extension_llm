@@ -239,7 +239,7 @@ echo "PID: $python_script_pid"
 #-----------------------------------------------------------------------------
 
 if [ "$tier" -eq 1 ]; then
-    tier_infer/migrate_llm_memory_daemon $python_script_pid tier_infer/llm_mem_region_migrate.log tier_infer/llm_mem_migrate_daemon_status.log $MIGRATE_THREADS &
+    tier_infer/migrate_llm_memory_daemon $python_script_pid tier_infer/log_files/llm_mem_region_migrate.log tier_infer/log_files/llm_mem_migrate_daemon_status.log $MIGRATE_THREADS &
     llm_tiering_daemon_pid=$!
 else
     # You can add commands here for the else branch, or leave it empty
