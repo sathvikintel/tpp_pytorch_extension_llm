@@ -1155,48 +1155,49 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
         t_inp, t_cache, use_cache);
   }
 
-    // Helper functions to dump tensor data
-  inline void dump_tensor_address_range(void* start, size_t nbytes, const std::string& log_file = "/data/sathvik/tpp-pytorch-extension/tier_infer/llm_mem_region_migrate.log") {
-    uintptr_t start_addr = reinterpret_cast<uintptr_t>(start);
-    uintptr_t end_addr = start_addr + nbytes;
-    if (start_addr == 0 && end_addr == 0) return; 
-    std::ofstream fout(log_file, std::ios::app);
-    fout << "0x" << std::hex << start_addr << "-0x" << std::hex << end_addr << std::endl;
-  }
-
-
-  // Scaling factor for total bytes
+  // Scaling factor for total bytes (can be adjusted as needed)
   double kTotalBytesScale = 1.0;
 
-  // Overload for at::Tensor
-  inline std::pair<size_t, void*> profile_tensor(const at::Tensor& t, const std::string& name = "") {
+  // Helper: Dump address range for each layer in a tensor
+  inline void dump_tensor_layer_address_ranges(
+      void* start,
+      size_t size_bytes,
+      size_t layer_num,
+      const std::string& name,
+      const std::string& log_file = "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log"
+  ) {
+      uintptr_t base_addr = reinterpret_cast<uintptr_t>(start);
+      std::ofstream fout(log_file, std::ios::app);
+      fout << name << ": " << std::endl;
+      uintptr_t layer_start = base_addr;
+      uintptr_t layer_end = layer_start + size_bytes;
+      fout << "L" << layer_num << ": "
+          << "0x" << std::hex << layer_start
+          << " - 0x" << layer_end << std::dec << std::endl;
+
+  }
+
+  // Profile a single tensor and dump address ranges
+  inline std::pair<size_t, void*> profile_tensor(const at::Tensor& t, const std::string& name, size_t layer_num) {
       if (t.defined()) {
           at::Tensor contig_t = t.contiguous();
           void* header_addr = static_cast<void*>(contig_t.data_ptr());
+          auto shape = contig_t.sizes();
+          if (shape.size() < 3) return std::make_pair(0, nullptr); // No layers
+
+          // Dump scaled address range to log file
           size_t nbytes = contig_t.nbytes();
           size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
-          dump_tensor_address_range(header_addr, scaled_nbytes); // <-- Log address range
+
+          if(layer_num == 0){
+            layer_num = 32;
+          }
+
+          dump_tensor_layer_address_ranges(header_addr, scaled_nbytes, layer_num, name);
+
           return std::make_pair(scaled_nbytes, header_addr);
       }
       return std::make_pair(0, nullptr);
-  }
-
-  inline std::pair<size_t, void*> profile_tensor(const std::vector<at::Tensor>& v, const std::string& name = "") {
-      size_t total = 0;
-      void* first_addr = nullptr;
-      for (size_t i = 0; i < v.size(); ++i) {
-          if (v[i].defined()) {
-              at::Tensor contig_t = v[i].contiguous();
-              void* header_addr = static_cast<void*>(contig_t.data_ptr());
-              size_t nbytes = contig_t.nbytes();
-              size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
-              dump_tensor_address_range(header_addr, scaled_nbytes); // Pass scaled nbytes
-              if (!first_addr) first_addr = header_addr;
-              total += nbytes;
-          }
-      }
-      size_t scaled_total = static_cast<size_t>(total * kTotalBytesScale);
-      return std::make_pair(scaled_total, first_addr);
   }
 
   int get_env_int(const char* varname, int default_val) {
@@ -1224,7 +1225,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     infile.close();
 
     // token and layer ID to be profiles
-    int profile_token = get_env_int("PROFILE_TOKEN", 2);  
+    int profile_token = get_env_int("PROFILE_TOKEN", 1);  
     int profile_layer = get_env_int("PROFILE_LAYER", 20);    
 
     // Track of layer number being executed
@@ -1264,8 +1265,8 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
 
     // Dump addr range of tensors to log file during start of decode phase (2nd token)
     if(token == profile_token){
-        profile_tensor(t_Wq);
-        profile_tensor(t_Wp);
+        profile_tensor(t_Wq, "W_q", layer);
+        profile_tensor(t_Wp, "W_p", layer);
       }
 
     // Execution of decoder layer 

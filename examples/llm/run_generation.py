@@ -209,56 +209,6 @@ def print_model_parameters(model, log_file="log_files/llama_weight_params_info.l
         f.write(output)
 
 
-
-
-
-def dump_tensor_address_ranges(model, log_file="log_files/llm_mem_region_migrate.log"):
-    """
-    Variables that need to be moved to HBM
-    """
-    code_to_weight = {
-        # "t_Gi": "input_layernorm.weight",
-
-        # "t_Wq": "self_attn.q_proj.weight",
-        # "t_Wk": "self_attn.k_proj.weight",
-        # "t_Wv": "self_attn.v_proj.weight",
-
-        # "t_Wp":  "self_attn.o_proj.weight",
-
-        # "t_Gpa": "post_attention_layernorm.weight",
-        # "t_Wg":  "mlp.gate_proj.weight",
-        # "t_Wu":  "mlp.up_proj.weight",
-
-        # "t_Wd": "mlp.down_proj.weight"
-    }
-
-    # Find the number of layers by scanning parameter names
-    layer_indices = set()
-    for name, _ in model.named_parameters():
-        if name.startswith("model.layers."):
-            try:
-                idx = int(name.split(".")[2])
-                layer_indices.add(idx)
-            except Exception:
-                continue
-    layer_indices = sorted(layer_indices)
-
-    with open(log_file, "w") as f:
-        for layer_idx in layer_indices:
-            for alias, short_name in code_to_weight.items():
-                param_name = f"model.layers.{layer_idx}.{short_name}"
-                for name, param in model.named_parameters():
-                    if name == param_name:
-                        # Ensure param is on CPU and contiguous
-                        param = param.detach().cpu().contiguous()
-                        start_addr = param.data_ptr()
-                        end_addr = start_addr + param.numel() * param.element_size()
-                        if(not(start_addr == 0 and end_addr == 0)):
-                            f.write(f"0x{start_addr:x}-0x{end_addr:x}\n")
-                        break  # Only one match per param_name
-
-    print(f"Address ranges written to: {log_file}")
-
 def write_kv_cache_size(pkv, summary_file):
     """
     Computes the total size of the KV cache (pkv) and writes a detailed report to summary_file.
@@ -367,8 +317,6 @@ tokenizer = model_class[1].from_pretrained(args.model_id)
 if not args.load_sharded_model:
     model = model.eval().to(device)
 model = model.to(memory_format=torch.channels_last)
-
-dump_tensor_address_ranges(model)
 
 print_model_parameters(model)
 
