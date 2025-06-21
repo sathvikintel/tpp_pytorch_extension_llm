@@ -126,6 +126,7 @@ tiering_daemon_perf_stat_file=${EXEC_DIR}/tiering_daemon_perf_stats.log
 
 mkdir -p ${EXEC_DIR}
 mkdir -p ${PLOTS_DIR}
+mkdir log_files/
 
 MSHR_COUNTERS="l1d_pend_miss.pending,l1d_pend_miss.pending_cycles,offcore_requests_outstanding.data_rd,offcore_requests_outstanding.cycles_with_data_rd,offcore_requests_outstanding.demand_data_rd,offcore_requests_outstanding.cycles_with_demand_data_rd,offcore_requests.data_rd,memory_activity.stalls_l1d_miss,memory_activity.stalls_l2_miss"
 
@@ -239,7 +240,7 @@ echo "PID: $python_script_pid"
 #-----------------------------------------------------------------------------
 
 if [ "$tier" -eq 1 ]; then
-    tier_infer/migrate_llm_memory_daemon $python_script_pid tier_infer/log_files/llm_mem_region_migrate.log tier_infer/log_files/llm_mem_migrate_daemon_status.log $MIGRATE_THREADS &
+    tier_infer/tier_infer $python_script_pid tier_infer/log_files/llm_mem_region_migrate.log tier_infer/log_files/llm_mem_migrate_daemon_status.log $MIGRATE_THREADS &
     llm_tiering_daemon_pid=$!
 else
     # You can add commands here for the else branch, or leave it empty

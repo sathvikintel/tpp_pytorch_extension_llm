@@ -20,14 +20,14 @@
 #include "threaded_loops.h"
 #endif
 #include <torch/csrc/distributed/c10d/comm.hpp>
+#include <cstdlib>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
 #include "fused_gemm.h"
 #include "qtypes.h"
 #include "timing.h"
 #include "xsmm_functors.h"
-#include <fstream>
-#include <ctime>
-#include <cstdlib>
-#include <iomanip>
 
 using namespace tpp;
 #include "attn.h"
@@ -1164,46 +1164,50 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       size_t size_bytes,
       size_t layer_num,
       const std::string& name,
-      const std::string& log_file = "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log"
-  ) {
-      uintptr_t base_addr = reinterpret_cast<uintptr_t>(start);
-      std::ofstream fout(log_file, std::ios::app);
-      fout << name << ": " << std::endl;
-      uintptr_t layer_start = base_addr;
-      uintptr_t layer_end = layer_start + size_bytes;
-      fout << "L" << layer_num << ": "
-          << "0x" << std::hex << layer_start
-          << " - 0x" << layer_end << std::dec << std::endl;
-
+      const std::string& log_file =
+          "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log") {
+    uintptr_t base_addr = reinterpret_cast<uintptr_t>(start);
+    std::ofstream fout(log_file, std::ios::app);
+    fout << name << ": " << std::endl;
+    uintptr_t layer_start = base_addr;
+    uintptr_t layer_end = layer_start + size_bytes;
+    fout << "L" << layer_num << ": "
+         << "0x" << std::hex << layer_start << " - 0x" << layer_end << std::dec
+         << std::endl;
   }
 
   // Profile a single tensor and dump address ranges
-  inline std::pair<size_t, void*> profile_tensor(const at::Tensor& t, const std::string& name, size_t layer_num) {
-      if (t.defined()) {
-          at::Tensor contig_t = t.contiguous();
-          void* header_addr = static_cast<void*>(contig_t.data_ptr());
-          auto shape = contig_t.sizes();
-          if (shape.size() < 3) return std::make_pair(0, nullptr); // No layers
+  inline std::pair<size_t, void*> profile_tensor(
+      const at::Tensor& t,
+      const std::string& name,
+      size_t layer_num) {
+    if (t.defined()) {
+      at::Tensor contig_t = t.contiguous();
+      void* header_addr = static_cast<void*>(contig_t.data_ptr());
+      auto shape = contig_t.sizes();
+      if (shape.size() < 3)
+        return std::make_pair(0, nullptr); // No layers
 
-          // Dump scaled address range to log file
-          size_t nbytes = contig_t.nbytes();
-          size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+      // Dump scaled address range to log file
+      size_t nbytes = contig_t.nbytes();
+      size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
 
-          if(layer_num == 0){
-            layer_num = 32;
-          }
-
-          dump_tensor_layer_address_ranges(header_addr, scaled_nbytes, layer_num, name);
-
-          return std::make_pair(scaled_nbytes, header_addr);
+      if (layer_num == 0) {
+        layer_num = 32;
       }
-      return std::make_pair(0, nullptr);
+
+      dump_tensor_layer_address_ranges(
+          header_addr, scaled_nbytes, layer_num, name);
+
+      return std::make_pair(scaled_nbytes, header_addr);
+    }
+    return std::make_pair(0, nullptr);
   }
 
   int get_env_int(const char* varname, int default_val) {
     const char* val = std::getenv(varname);
     if (val != nullptr) {
-        return std::atoi(val);
+      return std::atoi(val);
     }
     return default_val;
   }
@@ -1219,20 +1223,21 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     auto t_pid = t_inp[2];
 
     // fetch initial runtime of workload
-    std::ifstream infile("/data/sathvik/tpp-pytorch-extension/log_files/utc_start_time.txt");
+    std::ifstream infile(
+        "/data/sathvik/tpp-pytorch-extension/log_files/utc_start_time.txt");
     long long initial_time_epoch;
     infile >> initial_time_epoch;
     infile.close();
 
     // token and layer ID to be profiles
-    int profile_token = get_env_int("PROFILE_TOKEN", 1);  
-    int profile_layer = get_env_int("PROFILE_LAYER", 20);    
+    int profile_token = get_env_int("PROFILE_TOKEN", 1);
+    int profile_layer = get_env_int("PROFILE_LAYER", 20);
 
     // Track of layer number being executed
     static int total_layers = 0;
     int token = 0;
     // 32 for LLAMA-3 8B and 80 for LLAMA-3 70B
-    token = total_layers /32 ;
+    token = total_layers / 32;
     token += 1;
     total_layers += 1;
     int layer = total_layers % 32;
@@ -1263,13 +1268,14 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       t_Wd = this->t_Wd_1;
     }
 
-    // Dump addr range of tensors to log file during start of decode phase (2nd token)
-    if(token == profile_token){
-        profile_tensor(t_Wq, "W_q", layer);
-        profile_tensor(t_Wp, "W_p", layer);
-      }
+    // Dump addr range of tensors to log file during start of decode phase (2nd
+    // token)
+    if (token == profile_token) {
+      profile_tensor(t_Wq, "W_q", layer);
+      profile_tensor(t_Wp, "W_p", layer);
+    }
 
-    // Execution of decoder layer 
+    // Execution of decoder layer
     auto t_null = t_HS.new_empty({0});
     auto t_res = t_HS;
     t_HS = llama_rms_norm<T>(t_HS, t_Gi, eps);
