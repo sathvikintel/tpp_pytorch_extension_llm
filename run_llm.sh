@@ -143,6 +143,7 @@ touch "scripts/rss_log"
 > log_files/call_stack.log
 > log_files/llm_perf_stats.log 
 > log_files/llm_gemm_phase_mem_usage.log
+> log_files/token_layer_timestamps.log
 > tier_infer/log_files/llm_mem_migrate_daemon_status.log
 > tier_infer/log_files/llm_mem_region_migrate.log
 

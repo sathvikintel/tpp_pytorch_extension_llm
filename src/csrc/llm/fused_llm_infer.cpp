@@ -22,6 +22,7 @@
 #include <torch/csrc/distributed/c10d/comm.hpp>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include "fused_gemm.h"
@@ -1155,6 +1156,24 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
         t_inp, t_cache, use_cache);
   }
 
+  // Returns UTC time difference from start time of inference (in milliseconds)
+  long long get_utc_time_diff_from_start() {
+      // Read initial epoch time from file (should be in milliseconds)
+      std::ifstream infile("/data/sathvik/tpp-pytorch-extension/log_files/utc_start_time.txt");
+      long long initial_utc = 0;
+      infile >> initial_utc;
+      infile.close();
+
+      // Get current time in milliseconds since epoch (UTC)
+      auto now = std::chrono::system_clock::now();
+      auto current_utc = std::chrono::duration_cast<std::chrono::milliseconds>(
+          now.time_since_epoch()).count();
+
+      // Return the difference in milliseconds
+      return current_utc - initial_utc;
+  }
+
+
   // Scaling factor for total bytes (can be adjusted as needed)
   double kTotalBytesScale = 1.0;
 
@@ -1221,14 +1240,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     RECORD_SCOPE(pt_op, {t_HS});
     auto t_am = t_inp[1];
     auto t_pid = t_inp[2];
-
-    // fetch initial runtime of workload
-    std::ifstream infile(
-        "/data/sathvik/tpp-pytorch-extension/log_files/utc_start_time.txt");
-    long long initial_time_epoch;
-    infile >> initial_time_epoch;
-    infile.close();
-
+    
     // token and layer ID to be profiles
     int profile_token = get_env_int("PROFILE_TOKEN", 1);
     int profile_layer = get_env_int("PROFILE_LAYER", 20);
@@ -1241,6 +1253,20 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     token += 1;
     total_layers += 1;
     int layer = total_layers % 32;
+    if (layer == 0) {
+    layer = 32;
+    }
+
+    // Dump token and layer start time
+    std::ofstream outfile("/data/sathvik/tpp-pytorch-extension/log_files/token_layer_timestamps.log", std::ios::app);
+    if (!outfile.is_open()) {
+        std::cerr << "Error: Could not open token_layer_timestamps.log for appending!" << std::endl;
+    }
+
+    long long timestamp = get_utc_time_diff_from_start();
+
+    outfile << "Token " << token << " ; Layer " << layer << " : " << timestamp << " milliseconds" << std::endl;
+    outfile.close();
 
     // Weight loading phase
     bool weight_reuse = check_weight_reuse(t_HS);
@@ -1268,14 +1294,15 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       t_Wd = this->t_Wd_1;
     }
 
-    // Dump addr range of tensors to log file during start of decode phase (2nd
-    // token)
+    // Dump addr range of tensors to log file during start of decode phase (2nd token)
     if (token == profile_token) {
       profile_tensor(t_Wq, "W_q", layer);
       profile_tensor(t_Wp, "W_p", layer);
     }
 
     // Execution of decoder layer
+
+    // RMS 1
     auto t_null = t_HS.new_empty({0});
     auto t_res = t_HS;
     t_HS = llama_rms_norm<T>(t_HS, t_Gi, eps);
@@ -1285,6 +1312,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     auto i_gemm = GemmCaller<T>(SCOPE_ARG(i_gemm));
     auto o_gemm = GemmCaller<T>(SCOPE_ARG(o_gemm));
 
+    // QKV Computation
     at::Tensor t_QL, t_KL, t_VL;
     if (FUSED_QKV_GEMM == 0) {
       t_QL = qkv_gemm(t_HS, t_Wq, t_null);
@@ -1304,10 +1332,12 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
     }
 
+    // MHA 
     auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
 
     auto t_CL = outputs[0];
 
+    // MHA-Residual
     auto t_SO = proj_gemm(AddScalePostOp(t_res, scale), t_CL, t_Wp, t_null);
 
     if (my_size > 1) {
@@ -1316,10 +1346,14 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
 
     t_res = t_SO;
 
+    // RMS 2
     t_HS = llama_rms_norm<T>(t_SO, t_Gpa, eps);
 
+    // FFN
     auto t_I = i_gemm(SiluPostOp(), t_HS, t_Wg, t_null);
     t_I = i_gemm(MulPostOp(t_I), t_HS, t_Wu, t_null);
+
+    // FFN-Residual
     auto t_Out = o_gemm(AddScalePostOp(t_res, scale), t_I, t_Wd, t_null);
 
     if (my_size > 1) {
