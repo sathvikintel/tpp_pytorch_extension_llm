@@ -338,7 +338,7 @@ done
 
 kill -9 $numastat_pid &
 kill -9 $pcm_process_pid &
-# kill -9 $llm_tiering_daemon_pid &
+kill -9 $llm_tiering_daemon_pid &
 pkill pcm-memory 
 
 wait 

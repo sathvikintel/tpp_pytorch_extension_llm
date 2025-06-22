@@ -318,7 +318,7 @@ if not args.load_sharded_model:
     model = model.eval().to(device)
 model = model.to(memory_format=torch.channels_last)
 
-print_model_parameters(model)
+# print_model_parameters(model)
 
 # to hpu graph
 if args.device == "hpu":

@@ -1298,6 +1298,13 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     if (token == profile_token) {
       profile_tensor(t_Wq, "W_q", layer);
       profile_tensor(t_Wp, "W_p", layer);
+      if(layer == 32){
+      const std::string& weights_log_file =
+          "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log";
+      std::ofstream fout(weights_log_file, std::ios::app);
+      fout << std::endl;
+      fout << "Weight dump over" << std::endl;
+      }
     }
 
     // Execution of decoder layer
