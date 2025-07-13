@@ -14,3 +14,7 @@ llm_perf_stats.log
 rss_log
 log_files/
 *.log
+pin_kv/
+profile_memcpy_*
+migrate_llm_memory_*
+*.png
