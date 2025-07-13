@@ -343,9 +343,9 @@ fi
 scripts/monitor_numastat.sh $python_script_pid ${EXEC_DIR} &
 numastat_pid=$!
 
-# # monitor memory bandwidth 
-# python scripts/run_pcm_until_pid.py $python_script_pid $bw_log_file &
-# pcm_process_pid=$!
+# monitor memory bandwidth 
+python scripts/run_pcm_until_pid.py $python_script_pid $bw_log_file &
+pcm_process_pid=$!
 
 # monitor memory consumption
 python scripts/measure_rss.py $python_script_pid 0 -o $rss_output_file --summary-file $summary_file & 
