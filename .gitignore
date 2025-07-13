@@ -13,3 +13,4 @@ eval_/
 llm_perf_stats.log
 rss_log
 log_files/
+*.log
