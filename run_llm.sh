@@ -1,9 +1,8 @@
-if [ "$#" -ne 12 ]; then
-    echo "Usage: $0 <model> <params> <inp_seq_len> <new_tokens> <batch_size> <iter> <threads> <allocator> <huge_pages> (0/1) <spill to hbm first?> (0/1) <tier (0/1) <hbm_dram_log>"
+if [ "$#" -ne 15 ]; then
+    echo "Usage: $0 <model> <params> <inp_seq_len> <new_tokens> <batch_size> <iter> <threads> <allocator> <huge_pages> (0/1) <spill to hbm first?> (0/1) <tier (0/1) <hbm_dram_log> <N_L_HBM> <N_L_mig> <kv_static_pin>"
     exit 1
 fi
 
-echo 3 > /proc/sys/vm/drop_caches
 
 model="$1"
 params="$2"
@@ -17,7 +16,35 @@ huge_pages="$9"
 hbm_first="${10}"
 tier="${11}"
 hbm_dram_log="${12}"
+n_l_hbm="${13}"
+n_l_mig="${14}"
+kv_static_pin="${15}"
 
+
+export LD_PRELOAD=/data/sathvik/tpp-pytorch-extension/miniforge3/envs/pt251/lib/libcrypt.so.2:/data/sathvik/tpp-pytorch-extension/miniforge3/envs/pt251/lib/libpython3.9.so.1.0:/data/sathvik/tpp-pytorch-extension/miniforge3/envs/pt251/lib/libtcmalloc.so:/data/sathvik/tpp-pytorch-extension/miniforge3/envs/pt251/lib/libiomp5.so
+
+
+# if [ "$#" -ne 0]; then
+#     echo "Usage: $0"
+#     exit 1
+# fi
+
+# source "run_llm.cfg"
+
+
+echo 3 > /proc/sys/vm/drop_caches
+
+
+# Turn on tracing 
+echo 1 > /sys/kernel/debug/tracing/tracing_on
+
+echo 1 > /sys/kernel/debug/tracing/events/migrate/migrate_folio_unmap/enable
+echo 1 > /sys/kernel/debug/tracing/events/migrate/migrate_pages_batch/enable
+echo 1 > /sys/kernel/debug/tracing/events/migrate/kernel_move_pages/enable
+echo 1 > /sys/kernel/debug/tracing/events/migrate/do_move_pages_to_node/enable
+echo 1 > /sys/kernel/debug/tracing/events/migrate/move_pages/enable
+
+echo x86-tsc > /sys/kernel/debug/tracing/trace_clock
 
 ALLOCATOR=$allocator
 NUM_THREADS=$threads
@@ -123,6 +150,15 @@ llm_token_time_split=${PLOTS_DIR}/llm_token_time_split.png
 tma_pause_cycles_log_total=${EXEC_DIR}/tma_pause_cycles_log_total.log
 ipc_log=${EXEC_DIR}/ipc.log 
 tiering_daemon_perf_stat_file=${EXEC_DIR}/tiering_daemon_perf_stats.log
+move_pages_to_dram_split_log=${EXEC_DIR}/move_pages_to_dram_split.log
+move_pages_to_dram_split_image=${PLOTS_DIR}/move_pages_to_dram_split.png
+move_pages_to_hbm_split_log=${EXEC_DIR}/move_pages_to_hbm_split.log
+move_pages_to_hbm_split_image=${PLOTS_DIR}/move_pages_to_hbm_split.png
+kv_addr_size_log=${EXEC_DIR}/kv_cache_size.log
+attn_kernel_latency_log=${EXEC_DIR}/attn_kernel_latency.log
+ffn_kernel_latency_log=${EXEC_DIR}/ffn_kernel_latency.log
+ffn_attn_plot=${PLOTS_DIR}/ffn_attn_latency.png
+ffn_mha_perf_metrics_log=${EXEC_DIR}/ffn_mha_perf_metrics.log
 
 mkdir -p ${EXEC_DIR}
 mkdir -p ${PLOTS_DIR}
@@ -146,6 +182,11 @@ touch "scripts/rss_log"
 > log_files/token_layer_timestamps.log
 > tier_infer/log_files/llm_mem_migrate_daemon_status.log
 > tier_infer/log_files/llm_mem_region_migrate.log
+> kv_cache_size.log
+> log_files/attn_kernel_latency.log
+> llm_mem_region_migrate.log 
+> log_files/ffn_kernel_latency.log
+> log_files/ffn_mha_perf_metrics.log
 
 # Check and set the LD_PRELOAD based on the allocator variable
 if [ "$ALLOCATOR" == "tcmalloc" ]; then
@@ -163,7 +204,7 @@ elif [ "$ALLOCATOR" == "jemalloc" ]; then
         echo "Jemalloc library not found at /usr/lib64/libjemalloc.so.2." > $summary_file
     fi
 else
-    unset LD_PRELOAD
+    export LD_PRELOAD=$LD_PRELOAD
     echo "System malloc is set as the memory allocator." > $summary_file
 fi
 
@@ -212,6 +253,7 @@ fi
 
 echo 0 > /proc/sys/kernel/nmi_watchdog  
 
+
 if [ $model = "GPTJ" ] ; then
 OMP_NUM_THREADS=$NUM_THREADS KV_CACHE_INC_SIZE=4096 /home/sathvik/numactl/numactl  -N 0,1,2,3,4,5 --localalloc python -u examples/llm/run_generation.py --max-new-tokens $new_tokens --device cpu --dtype bfloat16 --input-tokens $inp_seq_len --batch-size $batch_size --use-tpp --num-iter $iter --num-warmup 0 --token-latency -m EleutherAI/gpt-j-6b  --summary_file $summary_file &
 fi
@@ -226,8 +268,8 @@ OMP_NUM_THREADS=$NUM_THREADS KV_CACHE_INC_SIZE=$new_tokens+$inp_seq_len /home/sa
 # OMP_NUM_THREADS=$NUM_THREADS KV_CACHE_INC_SIZE=8192 /home/sathvik/numactl/numactl -N 0 -w 0,2 python -u examples/llm/run_generation.py -m meta-llama/Meta-Llama-3-70B --use-tpp --token --batch-size $batch_size --dist-backend ccl --max $new_tokens --input $inp_seq_len --greedy --num-warmup 0 --num-iter $iter --summary-file $summary_file &
 fi
 if [ $model = "LLAMA-3.1" ] ; then
-# 7B
-OMP_NUM_THREADS=$NUM_THREADS KV_CACHE_INC_SIZE=8192 /home/sathvik/numactl/numactl -m 2 -N 0 python -u examples/llm/run_generation.py -m meta-llama/Llama-3.1-8B --use-tpp --token --batch-size $batch_size --dist-backend ccl --max $new_tokens --input $inp_seq_len --greedy --num-warmup 0 --num-iter $iter --summary-file $summary_file &
+# 8B
+OMP_NUM_THREADS=$NUM_THREADS KV_CACHE_INC_SIZE=$new_tokens+$inp_seq_len /home/sathvik/numactl/numactl -m 0 -N 0 python -u examples/llm/run_generation.py -m meta-llama/Llama-3.1-8B --use-tpp --token --batch-size $batch_size --dist-backend ccl --max $new_tokens --input $inp_seq_len --greedy --num-warmup 0 --num-iter $iter --summary-file $summary_file &
 # 70B
 # OMP_NUM_THREADS=$NUM_THREADS KV_CACHE_INC_SIZE=8192 /home/sathvik/numactl/numactl -m 0 -N 0 python -u examples/llm/run_generation.py -m meta-llama/Meta-Llama-3-70B --use-tpp --token --batch-size $batch_size --dist-backend ccl --max $new_tokens --input $inp_seq_len --greedy --num-warmup 0 --num-iter $iter --summary-file $summary_file &
 fi
@@ -241,23 +283,40 @@ echo "PID: $python_script_pid"
 #-----------------------------------------------------------------------------
 
 if [ "$tier" -eq 1 ]; then
-    tier_infer/tier_infer $python_script_pid tier_infer/log_files/llm_mem_region_migrate.log tier_infer/log_files/llm_mem_migrate_daemon_status.log $MIGRATE_THREADS &
+    echo "Tier infer invoked"
+    tier_infer/tier_infer $python_script_pid tier_infer/log_files/llm_mem_region_migrate.log tier_infer/log_files/llm_mem_migrate_daemon_status.log $MIGRATE_THREADS $n_l_mig $n_l_hbm &
     llm_tiering_daemon_pid=$!
 else
     # You can add commands here for the else branch, or leave it empty
     :
 fi
 
-# monitor data sharing across threads
-ps -T -p $python_script_pid > $pmap_output_file &
+# if [ "$tier" -eq 1 ]; then
+#     ./migrate_llm_memory_daemon $python_script_pid llm_mem_region_migrate.log llm_mem_migrate_daemon_status.log $MIGRATE_THREADS &
+#     llm_tiering_daemon_pid=$!
+# else
+    # You can add commands here for the else branch, or leave it empty
+    :
+# fi
 
-perf stat -e instructions,cycles -p $python_script_pid -o $ipc_log &
-#monitor generic PMU counters
-perf stat -x, -o $llm_perf_stat_file -e $PERF_EVENTS -p $python_script_pid &
+if [ "$kv_static_pin" -eq 1 ]; then
+    pin_kv/pin_kv $python_script_pid kv_cache_size.log 0 &
+    pin_kv_pid=$!
+else
+    # You can add commands here for the else branch, or leave it empty
+    :
+fi
 
-# perf stat -x, -o $tiering_daemon_perf_stat_file -e $PERF_EVENTS -p $llm_tiering_daemon_pid &
+# # monitor data sharing across threads
+# ps -T -p $python_script_pid > $pmap_output_file &
 
-perf stat -p $llm_tiering_daemon_pid &
+# perf stat -e instructions,cycles -p $python_script_pid -o $ipc_log &
+# #monitor generic PMU counters
+# perf stat -x, -o $llm_perf_stat_file -e $PERF_EVENTS -p $python_script_pid &
+
+# # perf stat -x, -o $tiering_daemon_perf_stat_file -e $PERF_EVENTS -p $llm_tiering_daemon_pid &
+
+# perf stat -p $llm_tiering_daemon_pid &
 # monitor mshr related counter
 #perf stat -x , -o $mhsr_log_file -e $MSHR_COUNTERS -I $PERF_TIMER -p $python_script_pid & 
 
@@ -267,7 +326,7 @@ perf stat -p $llm_tiering_daemon_pid &
 #perf lock record -p $python_script_pid --output=$perf_lock_time &
 
 #perf stat -x, -o $llm_load_model_perf_stat_file -e $PERF_EVENTS -p $python_script_pid &
-load_model_perf=$!
+# load_model_perf=$!
 
 # record user space and kernel time 
 #perf stat -o $user_kernel_time -e cycles:u,cycles:k -I $PERF_TIMER -p $python_script_pid &
@@ -284,9 +343,9 @@ load_model_perf=$!
 scripts/monitor_numastat.sh $python_script_pid ${EXEC_DIR} &
 numastat_pid=$!
 
-# monitor memory bandwidth 
-python scripts/run_pcm_until_pid.py $python_script_pid $bw_log_file &
-pcm_process_pid=$!
+# # monitor memory bandwidth 
+# python scripts/run_pcm_until_pid.py $python_script_pid $bw_log_file &
+# pcm_process_pid=$!
 
 # monitor memory consumption
 python scripts/measure_rss.py $python_script_pid 0 -o $rss_output_file --summary-file $summary_file & 
@@ -297,8 +356,8 @@ python scripts/measure_rss.py $python_script_pid 0 -o $rss_output_file --summary
 # monitor CPU utilization
 python scripts/monitor.py --pid $python_script_pid -o ${PLOTS_DIR}/cpu_util.png --avg_output ${PLOTS_DIR}/cpu_util_avg.png &
 
-# Record call graph 
-#perf record -o ${EXEC_DIR}/call_graph_perf.data -a -g -p $python_script_pid &
+#Record call graph 
+# perf record -o ${EXEC_DIR}/call_graph_perf.data -a -g -p $python_script_pid &
 
 # # Record memory allocations
 # strace -ttt -e trace=mmap,brk,munmap -o $strace_log_file -p $python_script_pid &
@@ -339,15 +398,26 @@ done
 kill -9 $numastat_pid &
 kill -9 $pcm_process_pid &
 kill -9 $llm_tiering_daemon_pid &
+kill -9 $pin_kv_pid &
 pkill pcm-memory 
 
 wait 
 
 echo 1 > /proc/sys/kernel/nmi_watchdog
 
+cp log_files/ffn_mha_perf_metrics.log $ffn_mha_perf_metrics_log &
+
+cp log_files/attn_kernel_latency.log $attn_kernel_latency_log &
+
+cp log_files/ffn_kernel_latency.log $ffn_kernel_latency_log &
+
+cp kv_cache_size.log $kv_addr_size_log &
+
+cat /sys/kernel/debug/tracing/trace  | grep tier_infer | grep -e "target_node=1" -e "target_node=0" > $move_pages_to_dram_split_log &
+
+cat /sys/kernel/debug/tracing/trace  | grep tier_infer | grep -e "target_node=2" -e "target_node=3" > $move_pages_to_hbm_split_log &
 
 python scripts/format_prefill_perf_stats.py &
-
 
 # cp /home/sathvik/tpp-pytorch-extension/llm_gemm_phase_mem_usage.log ${EXEC_DIR}/gemm_mem_usage.log &
 
@@ -367,6 +437,14 @@ python scripts/smap_process.py -i $strace_log_file -tmp ${EXEC_DIR} &
 
 
 wait 
+
+python scripts/attn_latency.py $attn_kernel_latency_log ${PLOTS_DIR} &
+
+python scripts/plot_ffn_attn_latency.py $ffn_kernel_latency_log $attn_kernel_latency_log $ffn_attn_plot &
+
+python scripts/viz_move_pages_split.py $move_pages_to_dram_split_log $move_pages_to_dram_split_image $summary_file &
+
+python scripts/viz_move_pages_split.py $move_pages_to_hbm_split_log $move_pages_to_hbm_split_image $summary_file &
 
 python scripts/perf_func_wise.py --output-dir ${PLOTS_DIR} --summary-file $summary_file &
 
@@ -397,7 +475,12 @@ python scripts/plot_mmap.py -o $PLOTS_DIR -tmp ${EXEC_DIR} &
 
 python scripts/brk_plot.py ${EXEC_DIR}/brk_strace_log.txt $brk_alloc_plot_file &
 
-wait 
+kv_layer_cache_size=$(awk '/Layer 32:/ {f=1} f && /Total KV cache size:/ {print $5; exit}' $kv_addr_size_log)
+
+kv_total=$(echo "$kv_cache_layer_size * 32" | bc -l)
+echo "KV cache size: $kv_total GB" >> "$summary_file"
+
+
 # python scripts/scatter_based_pebs.py -i ${EXEC_DIR}/pebs_log.txt -o $mem_pattern_output_file -m 5 &
 
 # python scripts/scatter_based_pebs.py -i ${EXEC_DIR}/pebs_log.txt -o $kv_cache_mem_pattern_output_file -min $kv_min_addr -max $kv_max_addr -m 5 &
@@ -420,6 +503,11 @@ wait
 
 cp $llm_perf_stat_file ${EXEC_DIR}/
 echo "Check $summary_file"
+echo "Check $move_pages_to_dram_split_log"
+echo "Check $move_pages_to_dram_split_image"
+echo "Check $move_pages_to_hbm_split_log"
+echo "Check $move_pages_to_hbm_split_image"
+
 # echo "Check $bw_log_file"
 
 # echo "Number of threads: $threads" >> $hbm_dram_log
@@ -430,7 +518,7 @@ echo "Check $summary_file"
 # echo "------------------------" >> $hbm_dram_log
 # echo "Check $hbm_dram_log"
 # echo "Check $perf_lock_time"
-# echo "Check ${EXEC_DIR}/call_graph_perf.data"
+echo "Check ${EXEC_DIR}/call_graph_perf.data"
 # echo "Check $user_kernel_time"
 # echo "Check $lock_trace_file"
 # echo "Check $pmap_output_file"
@@ -444,7 +532,10 @@ echo "Check $summary_file"
 # echo "Check $llm_perf_stat_file"
 # echo "Check $l2mpki_plot"
 # echo "Check $stalls_log"
-echo "Check $ipc_log"
-echo "Check $llm_perf_stat_file"
-echo "Check $tiering_daemon_perf_stat_file"
+# echo "Check $ipc_log"
+# echo "Check $llm_perf_stat_file"
+# echo "Check $tiering_daemon_perf_stat_file"
 echo 3 > /proc/sys/vm/drop_caches
+echo "Check $kv_addr_size_log"
+echo "Check $ffn_attn_plot"
+echo "Check $ffn_mha_perf_metrics_log"

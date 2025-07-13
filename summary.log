@@ -1,0 +1,24 @@
+
+---------- Summary: ----------
+Total time = 1661.101446390152
+Inference latency: 1661.101 sec.
+First token average latency: 5.690 sec.
+Average 2... latency: 0.8087 sec.
+P90 2... latency: 0.8173 sec.
+P99 2... latency: 0.8640 sec.
+
+---------- Summary: ----------
+Total time = 1829.5405645370483
+Inference latency: 1829.541 sec.
+First token average latency: 12.652 sec.
+Average 2... latency: 0.8876 sec.
+P90 2... latency: 0.9023 sec.
+P99 2... latency: 0.9559 sec.
+
+---------- Summary: ----------
+Total time = 184.09543800354004
+Inference latency: 184.095 sec.
+First token average latency: 3.631 sec.
+Average 2... latency: 0.0882 sec.
+P90 2... latency: 0.0905 sec.
+P99 2... latency: 0.0912 sec.

@@ -10,7 +10,7 @@
 
 #include <ATen/record_function.h>
 #include <torch/extension.h>
-
+#include <fstream> 
 #include <iostream>
 #include <vector>
 #include "ext_tpp.h"
@@ -29,6 +29,10 @@ using namespace tpp;
 #include "tensor_helper.h"
 
 #include "attn.h"
+
+#include <chrono>
+
+#define TIER_INFER
 
 static int my_rank = guess_mpi_rank();
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 128);
@@ -805,6 +809,58 @@ inline at::Tensor attn(
     t_beam_idx = at::empty({0}, t_QL.options().dtype(at::kLong));
   }
 
+  #ifdef TIER_INFER
+    
+    static int total_layers = 0;
+    int token = 0;
+    token = total_layers /32 ;
+    token += 1;
+    total_layers += 1;
+    int layer = total_layers % 32;
+
+    using Clock = std::chrono::high_resolution_clock;
+    using Microseconds = std::chrono::microseconds;
+    static uint64_t attn_access_time_us = 0;  // microseconds accumulator per thread
+    
+    if(token == 1){
+      // --- KV Cache Size Calculation and Logging ---
+      // Compute size of key and value tensors in bytes
+      size_t key_bytes = t_KL.numel() * t_KL.element_size();
+      size_t value_bytes = t_VL.numel() * t_VL.element_size();
+      double total_gb = static_cast<double>(key_bytes + value_bytes) / (1024.0 * 1024.0 * 1024.0);
+
+      // Get start and end addresses for K and V tensors
+      void* key_start = t_KL.data_ptr();
+      void* value_start = t_VL.data_ptr();
+      void* key_end = static_cast<char*>(key_start) + key_bytes;
+      void* value_end = static_cast<char*>(value_start) + value_bytes;
+
+      // Write to log file
+      std::ofstream kv_log("/data/sathvik/tpp-pytorch-extension/kv_cache_size.log", std::ios::app);
+      if (kv_log.is_open()) {
+          if(layer == 0){
+            kv_log << "Layer " << "32" << ": " << std::endl; 
+          }
+          else {
+            kv_log << "Layer " << layer << ": " << std::endl; 
+          }
+          kv_log << "Total KV cache size: " << std::fixed << std::setprecision(6) << total_gb << " GB\n";
+          kv_log << "Key tensor:   start=" << key_start << "  end=" << key_end << "  size=" << key_bytes << " bytes\n";
+          kv_log << "Value tensor: start=" << value_start << "  end=" << value_end << "  size=" << value_bytes << " bytes\n";
+          kv_log << "K.numel(): " << t_KL.numel() << " and size of each element : " << t_KL.element_size() << " bytes\n";
+          kv_log << "V.numel(): " << t_VL.numel() << " and size of each element : " << t_VL.element_size() << " bytes\n";
+          if(layer == 0){
+            kv_log << "KV dump over" << std::endl;
+          }
+          kv_log.close();
+      } else {
+          std::cerr << "Failed to open KV cache log file for writing.\n";
+      }
+      // --- End KV Cache Size Calculation ---
+    }
+
+  #endif 
+
   // KL: [NT, B, N, H, S2]
   // VL: [NT, B, N, S2, H]
   long S = t_AM.size(1);
@@ -862,11 +918,15 @@ inline at::Tensor attn(
   };
   {
     RECORD_OMP_TIME();
+    #ifdef TIER_INFER
+      auto start_attn = Clock::now();
+    #endif 
     {
 #pragma omp parallel for collapse(3)
       for (int b = 0; b < B; b++) {
         for (int n = 0; n < N; n++) {
           for (int sq = 0; sq < Sq; sq += Sqb) {
+            // printf("OMP threads used in attention kernel: %d\n", omp_get_num_threads());
             long qbs = (Sq - sq >= Sqb ? Sqb : Sq - sq);
             long qbsr = qbs * R;
             int qid = (sq + Sqb > Sq) ? 1 : 0;
@@ -950,9 +1010,253 @@ inline at::Tensor attn(
         }
       }
     }
+    #ifdef TIER_INFER
+      auto end_attn = Clock::now();
+      attn_access_time_us += std::chrono::duration_cast<Microseconds>(end_attn - start_attn).count();
+      std::ofstream latency_log("/data/sathvik/tpp-pytorch-extension/log_files/attn_kernel_latency.log", std::ios::app);
+      layer = layer ? layer : 32;
+      if (latency_log.is_open()) {
+          latency_log << "Token " << token << ", Layer: " << layer
+                      << ", Attention kernel compute latency: " << attn_access_time_us << " us\n";
+          latency_log.close();
+      } else {
+          std::cerr << "Failed to open KV cache access latency log file for writing.\n";
+      }
+      attn_access_time_us = 0;  // reset for next call
+    #endif 
   }
   return t_CL;
 }
+
+// // The attn function with full timing and logging
+// template <typename T, typename Tc = T>
+// inline at::Tensor attn(
+//     at::Tensor t_QL, // [B, N, Sq, R, H]
+//     std::vector<at::Tensor> t_KV,
+//     at::Tensor t_AM,
+//     const KVCacheMeta& cm,
+//     long key_len,
+//     bool isCausal = true) {
+
+//     using Clock = std::chrono::high_resolution_clock;
+//     using Microseconds = std::chrono::microseconds;
+//     static thread_local uint64_t kv_access_time_us = 0;  // microseconds accumulator per thread
+
+//     RECORD_SCOPE(ac_gemm1, {t_QL, t_KV[0], t_KV[1]});
+//     auto t_CL = at::empty_like(t_QL);
+//     auto sizes = t_QL.sizes();
+//     long B = sizes[0];
+//     long N = sizes[1]; // = Nkv
+//     long Sq = sizes[2];
+//     long R = sizes[3]; // = Nq / Nkv
+//     long H = sizes[4];
+//     long offset = key_len - Sq;
+//     float one_by_sqrt_H = 1.0 / sqrtf(H);
+//     auto t_KL = t_KV[0];
+//     auto t_VL = t_KV[1];
+//     bool isBeamSearch = t_KV.size() == 3;
+//     at::Tensor t_beam_idx;
+//     if (isBeamSearch) {
+//         t_beam_idx = t_KV[2];
+//     } else {
+//         t_beam_idx = at::empty({0}, t_QL.options().dtype(at::kLong));
+//     }
+
+//     static int total_layers = 0;
+//     int token = 0;
+//     token = total_layers / 32;
+//     token += 1;
+//     total_layers += 1;
+//     int layer = total_layers % 32;
+
+//     // --- KV Cache Size Calculation and Logging ---
+//     if(token == 1){
+//         // Compute size of key and value tensors in bytes
+//         size_t key_bytes = t_KL.numel() * t_KL.element_size();
+//         size_t value_bytes = t_VL.numel() * t_VL.element_size();
+//         double total_gb = static_cast<double>(key_bytes + value_bytes) / (1024.0 * 1024.0 * 1024.0);
+
+//         // Get start and end addresses for K and V tensors
+//         void* key_start = t_KL.data_ptr();
+//         void* value_start = t_VL.data_ptr();
+//         void* key_end = static_cast<char*>(key_start) + key_bytes;
+//         void* value_end = static_cast<char*>(value_start) + value_bytes;
+
+//         // Write to log file
+//         std::ofstream kv_log("/data/sathvik/tpp-pytorch-extension/kv_cache_size.log", std::ios::app);
+//         if (kv_log.is_open()) {
+//             kv_log << "Layer " << layer << ": " << std::endl;
+//             kv_log << "Total KV cache size: " << std::fixed << std::setprecision(6) << total_gb << " GB\n";
+//             kv_log << "Key tensor:   start=" << key_start << "  end=" << key_end << "  size=" << key_bytes << " bytes\n";
+//             kv_log << "Value tensor: start=" << value_start << "  end=" << value_end << "  size=" << value_bytes << " bytes\n";
+//             kv_log << "K.numel(): " << t_KL.numel() << " and size of each element : " << t_KL.element_size() << " bytes\n";
+//             kv_log << "V.numel(): " << t_VL.numel() << " and size of each element : " << t_VL.element_size() << " bytes\n";
+//             kv_log.close();
+//         } else {
+//             std::cerr << "Failed to open KV cache log file for writing.\n";
+//         }
+//     }
+//     // --- End KV Cache Size Calculation ---
+
+//     long S = t_AM.size(1);
+//     long S2 = cm.S2;
+//     long S1 = S / S2;
+//     const long Sqb = (R <= 32 ? 64 / R : 1);
+//     long qrem = Sq % Sqb;
+//     const long Skb = (SK_BLOCK_SIZE + S2 - 1) / S2;
+
+//     auto s1k_str = cm.key.s1_str;
+//     auto s1v_str = cm.value.s1_str;
+//     auto bk_str = cm.key.b_str;
+//     auto bv_str = cm.value.b_str;
+//     auto nk_str = cm.key.n_str;
+//     auto nv_str = cm.value.n_str;
+
+//     auto QL = GetVLAPtr<T>(t_QL, {N, Sq, R, H});
+//     auto KL = GetVLAPtrFromStrides<Tc>(t_KL, {s1k_str, bk_str, nk_str});
+//     auto VL = GetVLAPtrFromStrides<Tc>(t_VL, {s1v_str, bv_str, nv_str});
+//     auto CL = GetVLAPtr<T>(t_CL, {N, Sq, R, H});
+//     auto AM = GetVLAPtr<T>(t_AM, {S1, S2});
+//     auto beam_idx = GetVLAPtr<long>(t_beam_idx, {S1, S2});
+
+//     if (isBeamSearch) {
+//         TPP_ASSERT(t_beam_idx.size(1) == S1 * S2, "Invalid beam_idx size\n");
+//     }
+
+//     static bool print_flag = true;
+//     if (print_flag) {
+//         if (my_rank == 0)
+//             printf("BNSqRH: %ld %ld %ld %ld %ld\n", B, N, Sq, R, H);
+//         printf("S S1 S2: %ld %ld %ld\n", S, S1, S2);
+//         printf(
+//             "Attn: Sqb = %ld Skb = %ld qrem = %ld use_flash = %s\n",
+//             Sqb,
+//             Skb,
+//             qrem,
+//             USE_FLASH ? "True" : "False");
+//         cm.print();
+//         print_flag = false;
+//     }
+
+//     AttnKernelsNew<T, Tc> attn_kern[2] = {
+//         GetAttnKernelsNew<T, Tc>(Sqb * R, S2, H, cm, isBeamSearch),
+//         GetAttnKernelsNew<T, Tc>(qrem * R, S2, H, cm, isBeamSearch),
+//     };
+
+//     {
+//         RECORD_OMP_TIME();
+//         {
+// #pragma omp parallel for collapse(3)
+//             for (int b = 0; b < B; b++) {
+//                 for (int n = 0; n < N; n++) {
+//                     for (int sq = 0; sq < Sq; sq += Sqb) {
+//                         long qbs = (Sq - sq >= Sqb ? Sqb : Sq - sq);
+//                         long qbsr = qbs * R;
+//                         int qid = (sq + Sqb > Sq) ? 1 : 0;
+//                         auto& ak = attn_kern[qid];
+//                         auto q_ptr = QL ? nullptr : nullptr;
+//                         auto c_ptr = CL ? nullptr : nullptr;
+//                         float omax[qbsr], osum[qbsr], cmax[qbsr], csum[qbsr];
+//                         auto S1End = (!isCausal ? S1 : (sq + qbs + offset + S2 - 1) / S2);
+
+//                         for (int s1 = 0; s1 < S1End; s1 += Skb) {
+//                             auto start_kv = Clock::now();
+
+//                             long kbs = std::min(Skb, S1End - s1);
+//                             float AS[kbs][qbsr * S2];
+//                             T AST[kbs][qbsr * S2];
+//                             ak.a_gemm_tpp.config();
+//                             for (int k = 0; k < kbs; k++) {
+//                                 Tc* k_ptr = KL ? nullptr : nullptr;
+//                                 Tc k_buf[S2 * H];
+//                                 if (isBeamSearch) {
+//                                     auto p_idx = beam_idx ? nullptr : nullptr;
+//                                     for (int s2 = 0; s2 < S2; s2++) {
+//                                         auto b_idx = p_idx ? 0 : 0;
+//                                         memcpy(
+//                                             k_buf + s2 * H,
+//                                             KL ? nullptr : nullptr,
+//                                             H * sizeof(Tc));
+//                                     }
+//                                     k_ptr = k_buf;
+//                                 }
+//                                 ak.a_gemm_tpp(q_ptr, k_ptr, AS[k], 1, true);
+//                                 ak.scale_tpp(AS[k], AS[k], one_by_sqrt_H);
+//                                 ak.add_mask_tpp(AM ? nullptr : nullptr, AS[k]);
+//                             }
+//                             ak.a_gemm_tpp.release();
+
+//                             if (isCausal) {
+//                                 auto k1end = s1 + kbs;
+//                                 for (int sq1 = 0; sq1 < qbs; sq1++) {
+//                                     auto kstart = sq + sq1 + offset + 1;
+//                                     auto k1start = kstart / S2;
+//                                     auto k2start = kstart % S2;
+//                                     for (int k1 = k1start; k1 < k1end; k1++) {
+//                                         auto lk2start = k1 == k1start ? k2start : 0;
+//                                         for (int r = 0; r < R; r++) {
+//                                             for (int k2 = lk2start; k2 < S2; k2++) {
+//                                                 AS[k1 - s1][sq1 * S2 * R + r * S2 + k2] = -1e9f;
+//                                             }
+//                                         }
+//                                     }
+//                                 }
+//                             }
+//                             if (s1 == 0) {
+//                                 ak.softmax_fwd_tpp(kbs, AS[0], AST[0], omax, osum, nullptr);
+//                             } else {
+//                                 ak.softmax_fwd_tpp(kbs, AS[0], AST[0], cmax, csum, omax);
+//                             }
+//                             Tc v_buf[kbs * S2 * H];
+//                             T tmp[qbs * R * H];
+//                             Tc* v_ptr = VL ? nullptr : nullptr;
+//                             if (isBeamSearch) {
+//                                 for (int k = 0; k < kbs; k++) {
+//                                     auto p_idx = beam_idx ? nullptr : nullptr;
+//                                     for (int s2 = 0; s2 < S2; s2++) {
+//                                         auto b_idx = p_idx ? 0 : 0;
+//                                         Tc* p_tmp = VL ? nullptr : nullptr;
+//                                         memcpy(v_buf + k * S2 * H + s2 * H, p_tmp, H * sizeof(Tc));
+//                                     }
+//                                 }
+//                                 v_ptr = v_buf;
+//                             }
+//                             ak.c_gemm_tpp(AST[0], v_ptr, tmp, kbs);
+//                             if (s1 == 0) {
+//                                 ak.cvt_tpp(tmp, c_ptr);
+//                             } else {
+//                                 ak.softmax_fixup(tmp, c_ptr, cmax, csum, omax, osum);
+//                             }
+
+//                             auto end_kv = Clock::now();
+//                             kv_access_time_us += std::chrono::duration_cast<Microseconds>(end_kv - start_kv).count();
+
+//                             ak.softmax_scale(c_ptr, osum);
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//     }
+
+//     std::cout << "I have reached this part of ATTN.CPP" << std::endl;
+//     // Dump to log file (thread-safe append)
+//     #pragma omp critical
+    // {
+        // std::ofstream latency_log("/data/sathvik/tpp-pytorch-extension/kv_cache_access_latency.log", std::ios::app);
+        // if (latency_log.is_open()) {
+        //     std::cout << "Latency file is open" << std::endl;
+        //     latency_log << "Layer: " << layer << ", Token: " << token
+        //                 << ", KV cache access latency: " << kv_access_time_us << " us\n";
+        //     latency_log.close();
+        // } else {
+        //     std::cerr << "Failed to open KV cache access latency log file for writing.\n";
+        // }
+        // kv_access_time_us = 0;  // reset for next call
+    // }
+
+//     return t_CL;
+// }
 
 template <typename T>
 at::Tensor attn_wrapper_impl(

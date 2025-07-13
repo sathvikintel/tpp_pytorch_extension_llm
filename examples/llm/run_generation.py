@@ -8,8 +8,9 @@ import inspect
 from accelerate import init_empty_weights
 from typing import Tuple
 import hashlib
-os.environ['CURL_CA_BUNDLE'] = ''
-os.environ['REQUESTS_CA_BUNDLE'] = ''
+
+os.environ["CURL_CA_BUNDLE"] = ""
+os.environ["REQUESTS_CA_BUNDLE"] = ""
 
 from transformers import (
     # pipeline,
@@ -88,10 +89,10 @@ parser.add_argument(
     "--prompt", default=None, type=str, help="input prompt for self-defined if needed"
 )
 parser.add_argument(
-    '--summary-file',
+    "--summary-file",
     type=str,
     default=None,
-    help='Path to a summary file to write summary statistics'
+    help="Path to a summary file to write summary statistics",
 )
 
 parser.add_argument("--greedy", action="store_true")
@@ -165,10 +166,17 @@ def dist_init():
 
 orig_print = print
 
-def print_model_parameters(model, log_file="log_files/llama_weight_params_info.log"):
+from collections import namedtuple
+
+# Define a global structure
+ParameterInfo = namedtuple('ParameterInfo', ['name', 'address', 'shape', 'trainable', 'dtype', 'size_gb'])
+global_param_addresses = []
+
+
+def print_model_parameters_and_store_addresses(model, log_file="log_files/llama_weight_params_info.log"):
     from prettytable import PrettyTable
 
-    GB_DIV = 1024 ** 3  # Number of bytes in a GB
+    GB_DIV = 1024**3  # Number of bytes in a GB
 
     table = PrettyTable(["Parameter Name", "Shape", "Trainable", "Dtype", "Size (GB)"])
     total_params = 0
@@ -176,17 +184,28 @@ def print_model_parameters(model, log_file="log_files/llama_weight_params_info.l
     total_size_bytes = 0
     trainable_size_bytes = 0
 
+    global global_param_addresses
+    global_param_addresses.clear()  # Reset previous entries
+
     for name, param in model.named_parameters():
         param_count = param.numel()
-        size_bytes = param_count * param.element_size()  # Calculate memory usage
+        size_bytes = param_count * param.element_size()
         size_gb = size_bytes / GB_DIV
+
+        # Get the memory address of the parameter's data
+        address = param.data_ptr()
+
+        # Store all info in the global structure
+        global_param_addresses.append(ParameterInfo(
+            name, address, list(param.shape), param.requires_grad, str(param.dtype).replace("torch.", ""), size_gb
+        ))
 
         table.add_row([
             name,
             list(param.shape),
             param.requires_grad,
             str(param.dtype).replace("torch.", ""),
-            f"{size_gb:.4f}"
+            f"{size_gb:.4f}",
         ])
 
         total_params += param_count
@@ -197,71 +216,15 @@ def print_model_parameters(model, log_file="log_files/llama_weight_params_info.l
 
     total_size_gb = total_size_bytes / GB_DIV
 
-    # Prepare output
     output = "\nModel Parameters:\n"
     output += str(table)
     output += f"\n\nSum of all parameter sizes: {total_size_gb:.4f} GB\n"
 
     print(output)
 
-    # Optionally, write to log file
     with open(log_file, "w") as f:
         f.write(output)
 
-
-def write_kv_cache_size(pkv, summary_file):
-    """
-    Computes the total size of the KV cache (pkv) and writes a detailed report to summary_file.
-    Args:
-        pkv: The past_key_values tuple (as returned by model.generate(...))
-        summary_file: Path to the file to write the report to
-    """
-
-    import torch
-
-    total_bytes = 0
-    report_lines = []
-    # report_lines.append("KV Cache Size Report\n")
-    # report_lines.append(f"{'Layer':<8} {'Tensor':<8} {'Shape':<30} {'Dtype':<10} {'Size (MB)':>12}")
-
-    def handle_tensor(tensor, layer_idx, tensor_idx, subidx=None):
-        nonlocal total_bytes
-        numel = tensor.numel()
-        elem_size = tensor.element_size()
-        tensor_bytes = numel * elem_size
-        total_bytes += tensor_bytes
-        size_mb = tensor_bytes / (1024 * 1024)
-        idx_str = f"{tensor_idx}" if subidx is None else f"{tensor_idx}.{subidx}"
-        # report_lines.append(
-        #     f"{layer_idx:<8} {idx_str:<8} {str(list(tensor.shape)):<30} {str(tensor.dtype):<10} {size_mb:12.4f}"
-        # )
-
-    for layer_idx, layer_past in enumerate(pkv):
-        if isinstance(layer_past, (list, tuple)):
-            for tensor_idx, tensor in enumerate(layer_past):
-                if isinstance(tensor, torch.Tensor):
-                    handle_tensor(tensor, layer_idx, tensor_idx)
-                elif isinstance(tensor, (tuple, list)):
-                    for subidx, subtensor in enumerate(tensor):
-                        if isinstance(subtensor, torch.Tensor):
-                            handle_tensor(subtensor, layer_idx, tensor_idx, subidx)
-                        # else: skip non-tensor
-                # else: skip non-tensor
-        elif isinstance(layer_past, torch.Tensor):
-            handle_tensor(layer_past, layer_idx, 0)
-        # else: skip non-tensor/non-iterable
-
-    total_mb = total_bytes / (1024 * 1024)
-    total_gb = total_bytes / (1024 ** 3)
-    report_lines.append(f"\nTotal KV cache size:  {total_gb:.6f} GB")
-
-    try:
-        with open(summary_file, "a") as f:
-            for line in report_lines:
-                f.write(line + "\n")
-        print(f"KV cache size report written to: {summary_file}")
-    except Exception as e:
-        print(f"Error writing KV cache size report: {e}")
 
 
 
@@ -508,6 +471,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
     enabled=amp_enabled,
     dtype=amp_dtype if amp_enabled else None,
 ):
+    
     for i in range(num_iter):
         print(f"Iteration number: {i+1}, total_time = {total_time} ")
         tic = time.time()
@@ -516,12 +480,16 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         # input_ids = inputs.input_ids.to(device)
         # print(type(inputs))
 
+        max_seq_len = int(args.input_tokens) + int(args.max_new_tokens)
+
         output = model.generate(
-            **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
+            **inputs,
+            max_new_tokens=args.max_new_tokens,
+            **generate_kwargs
         )
+
         if output_past_key_values == True:
             output, pkv = output
-            write_kv_cache_size(pkv, summary_file)
 
         gen_ids = output[0] if args.token_latency else output
         gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
@@ -550,7 +518,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
                     flush=True,
                 )
 
-with open(summary_file, 'a') as f:
+with open(summary_file, "a") as f:
     f.write("\n" + "-" * 10 + " Summary: " + "-" * 10 + "\n")
     latency = total_time / (num_iter - num_warmup)
     f.write(f"Total time = {total_time}\n")
@@ -569,4 +537,3 @@ with open(summary_file, 'a') as f:
         f.write("Average 2... latency: %.4f sec.\n" % average_2n_latency)
         f.write("P90 2... latency: %.4f sec.\n" % p90_latency)
         f.write("P99 2... latency: %.4f sec.\n" % p99_latency)
-

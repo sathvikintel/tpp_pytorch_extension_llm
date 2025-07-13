@@ -20,9 +20,9 @@
 #include "threaded_loops.h"
 #endif
 #include <torch/csrc/distributed/c10d/comm.hpp>
+#include <chrono>
 #include <cstdlib>
 #include <ctime>
-#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include "fused_gemm.h"
@@ -34,6 +34,11 @@ using namespace tpp;
 #include "attn.h"
 #include "shm_coll.h"
 #include "tensor_helper.h"
+#include <perfcpp/event_counter.h>
+
+#define TIER_INFER
+// #define PERF_CPP
+
 
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
@@ -1158,24 +1163,68 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
 
   // Returns UTC time difference from start time of inference (in milliseconds)
   long long get_utc_time_diff_from_start() {
-      // Read initial epoch time from file (should be in milliseconds)
-      std::ifstream infile("/data/sathvik/tpp-pytorch-extension/log_files/utc_start_time.txt");
-      long long initial_utc = 0;
-      infile >> initial_utc;
-      infile.close();
+    // Read initial epoch time from file (should be in milliseconds)
+    std::ifstream infile(
+        "/data/sathvik/tpp-pytorch-extension/log_files/utc_start_time.txt");
+    long long initial_utc = 0;
+    infile >> initial_utc;
+    infile.close();
 
-      // Get current time in milliseconds since epoch (UTC)
-      auto now = std::chrono::system_clock::now();
-      auto current_utc = std::chrono::duration_cast<std::chrono::milliseconds>(
-          now.time_since_epoch()).count();
+    // Get current time in milliseconds since epoch (UTC)
+    auto now = std::chrono::system_clock::now();
+    auto current_utc = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           now.time_since_epoch())
+                           .count();
 
-      // Return the difference in milliseconds
-      return current_utc - initial_utc;
+    // Return the difference in milliseconds
+    return current_utc - initial_utc;
   }
 
-
+#ifdef TIER_INFER     
   // Scaling factor for total bytes (can be adjusted as needed)
-  double kTotalBytesScale = 1.0;
+  double kTotalBytesScale = 1;
+
+  //   // Scaling factor for total bytes
+  // double kTotalBytesScale = 1.0;
+
+  inline void dump_tensor_address_range(void* start, size_t nbytes, const std::string& log_file = "llm_mem_region_migrate.log") {
+    uintptr_t start_addr = reinterpret_cast<uintptr_t>(start);
+    uintptr_t end_addr = start_addr + nbytes;
+    if (start_addr == 0 && end_addr == 0) return; 
+    std::ofstream fout(log_file, std::ios::app);
+    fout << "0x" << std::hex << start_addr << "-0x" << std::hex << end_addr << std::endl;
+  }
+
+  // Overload for at::Tensor
+  inline std::pair<size_t, void*> get_total_nbytes(const at::Tensor& t, const std::string& name = "") {
+      if (t.defined()) {
+          at::Tensor contig_t = t.contiguous();
+          void* header_addr = static_cast<void*>(contig_t.data_ptr());
+          size_t nbytes = contig_t.nbytes();
+          size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+          dump_tensor_address_range(header_addr, scaled_nbytes); // <-- Log address range
+          return std::make_pair(scaled_nbytes, header_addr);
+      }
+      return std::make_pair(0, nullptr);
+  }
+
+  inline std::pair<size_t, void*> get_total_nbytes(const std::vector<at::Tensor>& v, const std::string& name = "") {
+      size_t total = 0;
+      void* first_addr = nullptr;
+      for (size_t i = 0; i < v.size(); ++i) {
+          if (v[i].defined()) {
+              at::Tensor contig_t = v[i].contiguous();
+              void* header_addr = static_cast<void*>(contig_t.data_ptr());
+              size_t nbytes = contig_t.nbytes();
+              size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+              dump_tensor_address_range(header_addr, scaled_nbytes); // Pass scaled nbytes
+              if (!first_addr) first_addr = header_addr;
+              total += nbytes;
+          }
+      }
+      size_t scaled_total = static_cast<size_t>(total * kTotalBytesScale);
+      return std::make_pair(scaled_total, first_addr);
+  }
 
   // Helper: Dump address range for each layer in a tensor
   inline void dump_tensor_layer_address_ranges(
@@ -1223,6 +1272,74 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     return std::make_pair(0, nullptr);
   }
 
+  // Profile a vector of tensors and dump address ranges for each
+  inline std::pair<size_t, void*> profile_tensor_vector(
+      const std::vector<at::Tensor>& tensors,
+      const std::string& name,
+      size_t layer_num)
+  {
+      size_t total_scaled_nbytes = 0;
+      void* first_addr = nullptr;
+      for (size_t i = 0; i < tensors.size(); ++i) {
+          const at::Tensor& t = tensors[i];
+          if (t.defined()) {
+              at::Tensor contig_t = t.contiguous();
+              void* header_addr = static_cast<void*>(contig_t.data_ptr());
+              auto shape = contig_t.sizes();
+              if (shape.size() < 3)
+                  continue; // Skip tensors with no layers
+
+              size_t nbytes = contig_t.nbytes();
+              size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+
+              size_t this_layer_num = layer_num;
+              if (this_layer_num == 0)
+                  this_layer_num = 32;
+
+              // Optionally, append the index to the name for clarity
+              std::string tensor_name = name.empty() ? std::to_string(i) : (name + "_" + std::to_string(i));
+
+              dump_tensor_layer_address_ranges(
+                  header_addr, scaled_nbytes, this_layer_num, tensor_name);
+
+              if (!first_addr)
+                  first_addr = header_addr;
+              total_scaled_nbytes += scaled_nbytes;
+          }
+      }
+      return std::make_pair(total_scaled_nbytes, first_addr);
+  }
+
+//   inline std::pair<size_t, void*> get_total_nbytes(const at::Tensor& t, const std::string& name = "") {
+//     if (t.defined()) {
+//         at::Tensor contig_t = t.contiguous();
+//         void* header_addr = static_cast<void*>(contig_t.data_ptr());
+//         size_t nbytes = contig_t.nbytes();
+//         size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+//         dump_tensor_address_range(header_addr, scaled_nbytes); // <-- Log address range
+//         return std::make_pair(scaled_nbytes, header_addr);
+//     }
+//     return std::make_pair(0, nullptr);
+// }
+
+// inline std::pair<size_t, void*> get_total_nbytes(const std::vector<at::Tensor>& v, const std::string& name = "") {
+//     size_t total = 0;
+//     void* first_addr = nullptr;
+//     for (size_t i = 0; i < v.size(); ++i) {
+//         if (v[i].defined()) {
+//             at::Tensor contig_t = v[i].contiguous();
+//             void* header_addr = static_cast<void*>(contig_t.data_ptr());
+//             size_t nbytes = contig_t.nbytes();
+//             size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
+//             dump_tensor_address_range(header_addr, scaled_nbytes); // Pass scaled nbytes
+//             if (!first_addr) first_addr = header_addr;
+//             total += nbytes;
+//         }
+//     }
+//     size_t scaled_total = static_cast<size_t>(total * kTotalBytesScale);
+//     return std::make_pair(scaled_total, first_addr);
+// }
+
   int get_env_int(const char* varname, int default_val) {
     const char* val = std::getenv(varname);
     if (val != nullptr) {
@@ -1230,6 +1347,37 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     }
     return default_val;
   }
+    
+  void log_event_counter_results(perf::EventCounter& event_counter, const std::string& section_name, int token, int layer, 
+    const std::string& log_file_path = "/data/sathvik/tpp-pytorch-extension/log_files/ffn_mha_perf_metrics.log")
+  {
+      // Stop the event counter to finalize counting
+      event_counter.stop();
+
+      // Open log file in append mode
+      std::ofstream logfile(log_file_path, std::ios::app);
+      if (!logfile.is_open())
+      {
+          std::cerr << "Error: Unable to open log file: " << log_file_path << std::endl;
+          return;  // Or throw exception if preferred
+      }
+
+      logfile << std::endl;
+      logfile << "Token " << token << "; Layer " << layer << std::endl;
+
+      logfile << section_name << std::endl;
+
+      // Retrieve results: assuming result() returns a container of pairs (event_name, value)
+      const auto result = event_counter.result();
+      
+      for (const auto& [event_name, value] : result)
+      {
+          logfile << event_name << ": " << value << std::endl;
+      }
+
+      logfile.close();
+  }
+#endif
 
   template <typename T>
   std::vector<at::Tensor> _forward(
@@ -1240,33 +1388,58 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     RECORD_SCOPE(pt_op, {t_HS});
     auto t_am = t_inp[1];
     auto t_pid = t_inp[2];
+
+    #ifdef TIER_INFER
+
+      using Clock = std::chrono::high_resolution_clock;
+      using Microseconds = std::chrono::microseconds;
+      static uint64_t ffn_access_time_us = 0;  
+
+      // token and layer ID to be profiles
+      int profile_token = get_env_int("PROFILE_TOKEN", 2);
+      int profile_layer = get_env_int("PROFILE_LAYER", 20);
+
+      // Initialize the counter
+      auto counters = perf::CounterDefinition{};
+      auto event_counter = perf::EventCounter{ counters };
+
+      // Specify hardware events to count
+      event_counter.add({ 
+        "instructions",
+        "cycles",
+        "cache-misses",
+        "nanoseconds"
+      });
+
+      // Track of layer number being executed
+      static int total_layers = 0;
+      int token = 0;
+      // 32 for LLAMA-3 8B and 80 for LLAMA-3 70B
+      token = total_layers / 32;
+      token += 1;
+      total_layers += 1;
+      int layer = total_layers % 32;
+      if (layer == 0) {
+        layer = 32;
+      }
+
+      // Dump token and layer start time
+      std::ofstream outfile(
+          "/data/sathvik/tpp-pytorch-extension/log_files/token_layer_timestamps.log",
+          std::ios::app);
+      if (!outfile.is_open()) {
+        std::cerr
+            << "Error: Could not open token_layer_timestamps.log for appending!"
+            << std::endl;
+      }
+
+      long long timestamp = get_utc_time_diff_from_start();
+
+      outfile << "Token " << token << " ; Layer " << layer << " : " << timestamp
+              << " milliseconds" << std::endl;
+      outfile.close();
     
-    // token and layer ID to be profiles
-    int profile_token = get_env_int("PROFILE_TOKEN", 1);
-    int profile_layer = get_env_int("PROFILE_LAYER", 20);
-
-    // Track of layer number being executed
-    static int total_layers = 0;
-    int token = 0;
-    // 32 for LLAMA-3 8B and 80 for LLAMA-3 70B
-    token = total_layers / 32;
-    token += 1;
-    total_layers += 1;
-    int layer = total_layers % 32;
-    if (layer == 0) {
-    layer = 32;
-    }
-
-    // Dump token and layer start time
-    std::ofstream outfile("/data/sathvik/tpp-pytorch-extension/log_files/token_layer_timestamps.log", std::ios::app);
-    if (!outfile.is_open()) {
-        std::cerr << "Error: Could not open token_layer_timestamps.log for appending!" << std::endl;
-    }
-
-    long long timestamp = get_utc_time_diff_from_start();
-
-    outfile << "Token " << token << " ; Layer " << layer << " : " << timestamp << " milliseconds" << std::endl;
-    outfile.close();
+    #endif
 
     // Weight loading phase
     bool weight_reuse = check_weight_reuse(t_HS);
@@ -1294,18 +1467,51 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       t_Wd = this->t_Wd_1;
     }
 
-    // Dump addr range of tensors to log file during start of decode phase (2nd token)
-    if (token == profile_token) {
-      profile_tensor(t_Wq, "W_q", layer);
-      profile_tensor(t_Wp, "W_p", layer);
-      if(layer == 32){
-      const std::string& weights_log_file =
-          "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log";
-      std::ofstream fout(weights_log_file, std::ios::app);
-      fout << std::endl;
-      fout << "Weight dump over" << std::endl;
+    
+      if(token == 2){
+        this->t_Wq_1 = at::Tensor();
+        this->t_Wk_1 = at::Tensor();
+        this->t_Wv_1 = at::Tensor();
+        this->t_Wp_1 = at::Tensor();
+        this->t_Wg_1 = at::Tensor();
+        this->t_Wu_1 = at::Tensor();
+        this->t_Wd_1 = at::Tensor();
       }
-    }
+    #ifdef TIER_INFER
+      // Dump addr range of tensors to log file during start of decode phase (2nd
+      // token)
+      if (token == profile_token) {
+        profile_tensor(t_Wg, "W_g", layer);
+        profile_tensor(t_Wu, "W_u", layer);
+        profile_tensor(t_Wd, "W_d", layer);
+        profile_tensor(t_Wq, "W_q", layer);
+        profile_tensor(t_Wk, "W_k", layer);
+        profile_tensor(t_Wv, "W_v", layer);
+        profile_tensor(t_Wp, "W_p", layer);
+        profile_tensor(t_Gi, "W_Gi", layer);
+        profile_tensor(t_Gpa, "W_Gpa", layer);
+
+
+        // get_total_nbytes(t_Wg);
+        // get_total_nbytes(t_Wu);
+        // get_total_nbytes(t_Wd);
+        // get_total_nbytes(t_Wq);
+        // get_total_nbytes(t_Wk);
+        // get_total_nbytes(t_Wv);
+        // get_total_nbytes(t_Wp);
+        // get_total_nbytes(t_Gi);
+        // get_total_nbytes(t_Gpa);
+
+        if (layer == 32) {
+          const std::string& weights_log_file =
+              "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log";
+          std::ofstream fout(weights_log_file, std::ios::app);
+          fout << std::endl;
+          fout << "Weight dump over" << std::endl;
+        }
+      }
+
+    #endif
 
     // Execution of decoder layer
 
@@ -1339,8 +1545,19 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
     }
 
-    // MHA 
+    // MHA
+    #ifdef TIER_INFER
+      #ifdef PERF_CPP
+        event_counter.start();
+      #endif
+    #endif
+
     auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+    #ifdef TIER_INFER
+      #ifdef PERF_CPP
+        log_event_counter_results(event_counter, "MHA", token, layer);
+      #endif
+    #endif
 
     auto t_CL = outputs[0];
 
@@ -1357,8 +1574,36 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     t_HS = llama_rms_norm<T>(t_SO, t_Gpa, eps);
 
     // FFN
+    #ifdef TIER_INFER
+      auto start_ffn = Clock::now();
+      #ifdef PERF_CPP
+        event_counter.start();
+      #endif 
+    #endif
+
     auto t_I = i_gemm(SiluPostOp(), t_HS, t_Wg, t_null);
     t_I = i_gemm(MulPostOp(t_I), t_HS, t_Wu, t_null);
+    #ifdef TIER_INFER
+      #ifdef PERF_CPP
+        log_event_counter_results(event_counter, "FFN", token, layer);
+      #endif 
+    #endif
+  
+    // FFN
+    #ifdef TIER_INFER
+      auto end_ffn = Clock::now();
+      ffn_access_time_us += std::chrono::duration_cast<Microseconds>(end_ffn - start_ffn).count();
+      std::ofstream latency_log("/data/sathvik/tpp-pytorch-extension/log_files/ffn_kernel_latency.log", std::ios::app);
+      layer = layer ? layer : 32;
+      if (latency_log.is_open()) {
+          latency_log << "Token " << token << ", Layer: " << layer
+                      << ", FFN kernel compute latency: " << ffn_access_time_us << " us\n";
+          latency_log.close();
+      } else {
+          std::cerr << "Failed to open KV cache access latency log file for writing.\n";
+      }
+      ffn_access_time_us = 0;  
+    #endif 
 
     // FFN-Residual
     auto t_Out = o_gemm(AddScalePostOp(t_res, scale), t_I, t_Wd, t_null);
