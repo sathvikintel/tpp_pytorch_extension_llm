@@ -21,6 +21,8 @@ src/csrc/gnn/gat/fused_gat.cpp
 src/csrc/gnn/graphsage/fused_gsage.cpp
 src/csrc/llm/attn.cpp
 src/csrc/llm/fused_llm_infer.cpp
+src/csrc/llm/shared_queue_instances.cpp
+src/csrc/llm/shared_queue_wrapper.cpp
 src/tpp_pytorch_extension/__init__.py
 src/tpp_pytorch_extension/nn.py
 src/tpp_pytorch_extension/optim.py

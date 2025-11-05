@@ -31,13 +31,48 @@
 #include "xsmm_functors.h"
 
 using namespace tpp;
+#include <iomanip>
 #include "attn.h"
 #include "shm_coll.h"
 #include "tensor_helper.h"
-#include <perfcpp/event_counter.h>
 
 #define TIER_INFER
 // #define PERF_CPP
+#define DSA_SYNC
+
+#ifdef TIER_INFER
+#include <pthread.h>
+#include <condition_variable>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include "shared_queue_instances.h"
+#include "shared_queue_wrapper.h"
+#include <iostream>
+#include <sched.h>
+#include <unistd.h>
+#include <errno.h>
+#include <time.h>
+
+#include <numa.h>
+#include <numaif.h>
+#include "/data/sandeep/dsa_work/micro_benchmarks/library_move_pages/include/move_page_dsa.h"
+#endif
+
+#ifdef TIER_INFER
+extern "C" {
+typedef struct {
+  int argc;
+  char** argv;
+} tier_infer_args_t;
+
+void* tier_infer_thread(void* arg);
+}
+#endif
+
+#ifdef PERF_CPP
+#include <perfcpp/event_counter.h>
+#endif
 
 
 static int my_rank = guess_mpi_rank();
@@ -1179,92 +1214,49 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     // Return the difference in milliseconds
     return current_utc - initial_utc;
   }
-
-#ifdef TIER_INFER     
+#ifdef TIER_INFER
   // Scaling factor for total bytes (can be adjusted as needed)
   double kTotalBytesScale = 1;
 
-  //   // Scaling factor for total bytes
-  // double kTotalBytesScale = 1.0;
-
-  inline void dump_tensor_address_range(void* start, size_t nbytes, const std::string& log_file = "llm_mem_region_migrate.log") {
-    uintptr_t start_addr = reinterpret_cast<uintptr_t>(start);
-    uintptr_t end_addr = start_addr + nbytes;
-    if (start_addr == 0 && end_addr == 0) return; 
-    std::ofstream fout(log_file, std::ios::app);
-    fout << "0x" << std::hex << start_addr << "-0x" << std::hex << end_addr << std::endl;
-  }
-
-  // Overload for at::Tensor
-  inline std::pair<size_t, void*> get_total_nbytes(const at::Tensor& t, const std::string& name = "") {
-      if (t.defined()) {
-          at::Tensor contig_t = t.contiguous();
-          void* header_addr = static_cast<void*>(contig_t.data_ptr());
-          size_t nbytes = contig_t.nbytes();
-          size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
-          dump_tensor_address_range(header_addr, scaled_nbytes); // <-- Log address range
-          return std::make_pair(scaled_nbytes, header_addr);
-      }
-      return std::make_pair(0, nullptr);
-  }
-
-  inline std::pair<size_t, void*> get_total_nbytes(const std::vector<at::Tensor>& v, const std::string& name = "") {
-      size_t total = 0;
-      void* first_addr = nullptr;
-      for (size_t i = 0; i < v.size(); ++i) {
-          if (v[i].defined()) {
-              at::Tensor contig_t = v[i].contiguous();
-              void* header_addr = static_cast<void*>(contig_t.data_ptr());
-              size_t nbytes = contig_t.nbytes();
-              size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
-              dump_tensor_address_range(header_addr, scaled_nbytes); // Pass scaled nbytes
-              if (!first_addr) first_addr = header_addr;
-              total += nbytes;
-          }
-      }
-      size_t scaled_total = static_cast<size_t>(total * kTotalBytesScale);
-      return std::make_pair(scaled_total, first_addr);
-  }
-
-  // Helper: Dump address range for each layer in a tensor
-  inline void dump_tensor_layer_address_ranges(
+  inline void store_tensor_layer_address_ranges(
       void* start,
       size_t size_bytes,
       size_t layer_num,
-      const std::string& name,
-      const std::string& log_file =
-          "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log") {
+      const std::string& name) {
     uintptr_t base_addr = reinterpret_cast<uintptr_t>(start);
-    std::ofstream fout(log_file, std::ios::app);
-    fout << name << ": " << std::endl;
     uintptr_t layer_start = base_addr;
     uintptr_t layer_end = layer_start + size_bytes;
-    fout << "L" << layer_num << ": "
-         << "0x" << std::hex << layer_start << " - 0x" << layer_end << std::dec
-         << std::endl;
+
+    TensorLayerAddressRange data{};
+    std::strncpy(data.name, name.c_str(), MAX_NAME_LEN - 1);
+    data.name[MAX_NAME_LEN - 1] = '\0'; // ensure null-termination
+    data.layer_num = layer_num;
+    data.start_addr = layer_start;
+    data.end_addr = layer_end;
+    g_tensor_layer_queue.enqueue(data);
   }
 
   // Profile a single tensor and dump address ranges
-  inline std::pair<size_t, void*> profile_tensor(
+  inline std::pair<size_t, void*> send_to_tier_llm(
       const at::Tensor& t,
       const std::string& name,
       size_t layer_num) {
     if (t.defined()) {
-      at::Tensor contig_t = t.contiguous();
-      void* header_addr = static_cast<void*>(contig_t.data_ptr());
-      auto shape = contig_t.sizes();
+      at::Tensor config_t = t.contiguous();
+      void* header_addr = static_cast<void*>(config_t.data_ptr());
+      auto shape = config_t.sizes();
       if (shape.size() < 3)
         return std::make_pair(0, nullptr); // No layers
 
       // Dump scaled address range to log file
-      size_t nbytes = contig_t.nbytes();
+      size_t nbytes = config_t.nbytes();
       size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
 
       if (layer_num == 0) {
         layer_num = 32;
       }
 
-      dump_tensor_layer_address_ranges(
+      store_tensor_layer_address_ranges(
           header_addr, scaled_nbytes, layer_num, name);
 
       return std::make_pair(scaled_nbytes, header_addr);
@@ -1272,354 +1264,376 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     return std::make_pair(0, nullptr);
   }
 
-  // Profile a vector of tensors and dump address ranges for each
-  inline std::pair<size_t, void*> profile_tensor_vector(
-      const std::vector<at::Tensor>& tensors,
-      const std::string& name,
-      size_t layer_num)
-  {
-      size_t total_scaled_nbytes = 0;
-      void* first_addr = nullptr;
-      for (size_t i = 0; i < tensors.size(); ++i) {
-          const at::Tensor& t = tensors[i];
-          if (t.defined()) {
-              at::Tensor contig_t = t.contiguous();
-              void* header_addr = static_cast<void*>(contig_t.data_ptr());
-              auto shape = contig_t.sizes();
-              if (shape.size() < 3)
-                  continue; // Skip tensors with no layers
+#ifdef PERF_CPP
+  void log_event_counter_results(
+      perf::EventCounter& event_counter,
+      const std::string& section_name,
+      int token,
+      int layer,
+      const std::string& log_file_path =
+          "/data/sathvik/tpp-pytorch-extension/log_files/ffn_mha_perf_metrics.log") {
+    // Stop the event counter to finalize counting
+    event_counter.stop();
 
-              size_t nbytes = contig_t.nbytes();
-              size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
-
-              size_t this_layer_num = layer_num;
-              if (this_layer_num == 0)
-                  this_layer_num = 32;
-
-              // Optionally, append the index to the name for clarity
-              std::string tensor_name = name.empty() ? std::to_string(i) : (name + "_" + std::to_string(i));
-
-              dump_tensor_layer_address_ranges(
-                  header_addr, scaled_nbytes, this_layer_num, tensor_name);
-
-              if (!first_addr)
-                  first_addr = header_addr;
-              total_scaled_nbytes += scaled_nbytes;
-          }
-      }
-      return std::make_pair(total_scaled_nbytes, first_addr);
-  }
-
-//   inline std::pair<size_t, void*> get_total_nbytes(const at::Tensor& t, const std::string& name = "") {
-//     if (t.defined()) {
-//         at::Tensor contig_t = t.contiguous();
-//         void* header_addr = static_cast<void*>(contig_t.data_ptr());
-//         size_t nbytes = contig_t.nbytes();
-//         size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
-//         dump_tensor_address_range(header_addr, scaled_nbytes); // <-- Log address range
-//         return std::make_pair(scaled_nbytes, header_addr);
-//     }
-//     return std::make_pair(0, nullptr);
-// }
-
-// inline std::pair<size_t, void*> get_total_nbytes(const std::vector<at::Tensor>& v, const std::string& name = "") {
-//     size_t total = 0;
-//     void* first_addr = nullptr;
-//     for (size_t i = 0; i < v.size(); ++i) {
-//         if (v[i].defined()) {
-//             at::Tensor contig_t = v[i].contiguous();
-//             void* header_addr = static_cast<void*>(contig_t.data_ptr());
-//             size_t nbytes = contig_t.nbytes();
-//             size_t scaled_nbytes = static_cast<size_t>(nbytes * kTotalBytesScale);
-//             dump_tensor_address_range(header_addr, scaled_nbytes); // Pass scaled nbytes
-//             if (!first_addr) first_addr = header_addr;
-//             total += nbytes;
-//         }
-//     }
-//     size_t scaled_total = static_cast<size_t>(total * kTotalBytesScale);
-//     return std::make_pair(scaled_total, first_addr);
-// }
-
-  int get_env_int(const char* varname, int default_val) {
-    const char* val = std::getenv(varname);
-    if (val != nullptr) {
-      return std::atoi(val);
+    // Open log file in append mode
+    std::ofstream logfile(log_file_path, std::ios::app);
+    if (!logfile.is_open()) {
+      std::cerr << "Error: Unable to open log file: " << log_file_path
+                << std::endl;
+      return; // Or throw exception if preferred
     }
-    return default_val;
+
+    logfile << std::endl;
+    logfile << "Token " << token << "; Layer " << layer << std::endl;
+
+    logfile << section_name << std::endl;
+
+    // Retrieve results: assuming result() returns a container of pairs
+    // (event_name, value)
+    const auto result = event_counter.result();
+
+    for (const auto & [ event_name, value ] : result) {
+      logfile << event_name << ": " << value << std::endl;
+    }
+
+    logfile.close();
   }
-    
-  void log_event_counter_results(perf::EventCounter& event_counter, const std::string& section_name, int token, int layer, 
-    const std::string& log_file_path = "/data/sathvik/tpp-pytorch-extension/log_files/ffn_mha_perf_metrics.log")
-  {
-      // Stop the event counter to finalize counting
-      event_counter.stop();
+#endif
+#endif
 
-      // Open log file in append mode
-      std::ofstream logfile(log_file_path, std::ios::app);
-      if (!logfile.is_open())
-      {
-          std::cerr << "Error: Unable to open log file: " << log_file_path << std::endl;
-          return;  // Or throw exception if preferred
-      }
+/*
+DSA copy helpers
+*/
+#ifdef DSA_SYNC
 
-      logfile << std::endl;
-      logfile << "Token " << token << "; Layer " << layer << std::endl;
+#define DRAM_NODE 0 
+#define HBM_NODE 2
+#define DATA_SIZES 4
+#define PAGE_SIZE 4096
 
-      logfile << section_name << std::endl;
+struct move_page_thread_context *global_dsa_ctx = nullptr;
+int dsa_initialized = 0;
 
-      // Retrieve results: assuming result() returns a container of pairs (event_name, value)
-      const auto result = event_counter.result();
-      
-      for (const auto& [event_name, value] : result)
-      {
-          logfile << event_name << ": " << value << std::endl;
-      }
+size_t data_sizes_bytes[DATA_SIZES] = {
+    48 << 20,          // 48 MB
+    32 << 20,          // 32 MB
+    224 << 20,         // 224 MB
+    112 << 20          // 112 MB
+};
 
-      logfile.close();
+int ensure_dsa_initialized(int wq_count) {
+    if (global_dsa_ctx)
+        return 0;
+
+    if (!dsa_initialized) {
+        global_dsa_ctx = move_page_dsa_global_init(
+            1,            // threads = 1
+            wq_count,     // cq depth = WQ count
+            0,            // debug mode
+            0             // device id fixed to 0
+        );
+        if (!global_dsa_ctx) {
+            std::cerr << "ensure_dsa_initialized: failed to init DSA context\n";
+            return -1;
+        }
+        dsa_initialized = 1;
+    }
+    return 0;
+}
+
+void run_dsa_single(size_t size, move_page_thread_context *ctx) {
+    size_t num_pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    // Explicit cast needed for C++ (void* to char*)
+    char *src_base = (char*)numa_alloc_onnode(num_pages * PAGE_SIZE, DRAM_NODE);
+    char *dst_base = (char*)numa_alloc_onnode(num_pages * PAGE_SIZE, HBM_NODE);
+
+    if (!src_base || !dst_base) {
+        std::cerr << "alloc failed\n";
+        std::exit(1);
+    }
+
+    std::memset(src_base, 2, num_pages * PAGE_SIZE);
+    std::memset(dst_base, 0, num_pages * PAGE_SIZE);
+
+    void **src_pages = (void**)std::malloc(num_pages * sizeof(void*));
+    void **dst_pages = (void**)std::malloc(num_pages * sizeof(void*));
+
+    if (!src_pages || !dst_pages) {
+        std::cerr << "malloc page arrays failed\n";
+        std::exit(1);
+    }
+
+    for (size_t i = 0; i < num_pages; i++) {
+        src_pages[i] = src_base + i * PAGE_SIZE;
+        dst_pages[i] = dst_base + i * PAGE_SIZE;
+    }
+
+    // Cast malloc to proper struct pointer type
+    struct move_page_dsa_result *result = (struct move_page_dsa_result*)std::malloc(sizeof(struct move_page_dsa_result));
+    if (!result) {
+        std::cerr << "malloc for result struct failed\n";
+        std::exit(1);
+    }
+
+    int rc = do_dsa_copy(dst_pages, src_pages, num_pages, ctx, result);
+    if (rc != 0) {
+        std::cerr << "do_dsa_copy returned " << rc << std::endl;
+        std::exit(1);
+    }
+
+    numa_free(src_base, num_pages * PAGE_SIZE);
+    numa_free(dst_base, num_pages * PAGE_SIZE);
+    std::free(src_pages);
+    std::free(dst_pages);
+    std::free(result);
+}
+
+#endif
+
+
+template <typename T>
+std::vector<at::Tensor> _forward(
+    std::vector<at::Tensor>& t_inp,
+    c10::intrusive_ptr<TppCache> t_cache,
+    bool use_cache) {
+  auto t_HS = t_inp[0];
+  RECORD_SCOPE(pt_op, {t_HS});
+  auto t_am = t_inp[1];
+  auto t_pid = t_inp[2];
+
+#ifdef TIER_INFER
+
+  using Clock = std::chrono::high_resolution_clock;
+  using Microseconds = std::chrono::microseconds;
+  static uint64_t ffn_access_time_us = 0;
+
+  pthread_mutex_t g_shared_ts_state_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#ifdef PERF_CPP
+  auto counters = perf::CounterDefinition{};
+  auto event_counter = perf::EventCounter{counters};
+  event_counter.add({"instructions", "cycles", "cache-misses", "nanoseconds"});
+#endif
+
+  static int total_layers = 0;
+  int token = 0;
+  token = total_layers / 32;
+  token += 1;
+  total_layers += 1;
+  int layer = total_layers % 32;
+  if (layer == 0) {
+    layer = 32;
+  }
+
+  long long timestamp = get_utc_time_diff_from_start();
+
+  pthread_mutex_lock(&g_shared_ts_state_mutex);
+  const SharedTimingInfo item = {token, layer, timestamp};
+  g_timing_info_var.write(item);
+  pthread_mutex_unlock(&g_shared_ts_state_mutex);
+
+  std::ofstream outfile_ts(
+      "/data/sathvik/tpp-pytorch-extension/log_files/token_layer_timestamps.log",
+      std::ios::app);
+  if (outfile_ts.is_open()) {
+    outfile_ts << "Token " << token << " ; Layer " << layer << " : "
+               << timestamp << " milliseconds" << std::endl;
+    outfile_ts.close();
+  } else {
+    std::cerr << "Error: Could not open token_layer_timestamps.log for appending!\n";
+  }
+
+#endif
+
+  // Helper lambda to log timestamped weight access
+  auto log_weight_access = [](const std::string& weight_name) {
+    auto now = Clock::now();
+    auto time_us =
+        std::chrono::duration_cast<Microseconds>(now.time_since_epoch()).count();
+    std::ofstream log_file(
+        "/data/sathvik/tpp-pytorch-extension/access_times.log", std::ios::app);
+    if (log_file.is_open()) {
+      log_file << weight_name << " accessed at " << time_us << " us\n";
+      log_file.close();
+    } else {
+      std::cerr << "Failed to open access_times.log for writing.\n";
+    }
+  };
+
+  bool weight_reuse = check_weight_reuse(t_HS);
+  float scale = 1.0 / my_size;
+
+  auto t_Wq = this->t_Wq;
+  auto t_Wk = this->t_Wk;
+  auto t_Wv = this->t_Wv;
+  auto t_Wp = this->t_Wp;
+  auto t_Wg = this->t_Wg;
+  auto t_Wu = this->t_Wu;
+  auto t_Wd = this->t_Wd;
+
+  if (weight_reuse && TPP_CACHE_REMAPPED_WEIGHTS) {
+    if (!first_token_remapped)
+      remap_for_first_token<T>();
+
+    t_Wq = this->t_Wq_1;
+    t_Wk = this->t_Wk_1;
+    t_Wv = this->t_Wv_1;
+    t_Wp = this->t_Wp_1;
+    t_Wg = this->t_Wg_1;
+    t_Wu = this->t_Wu_1;
+    t_Wd = this->t_Wd_1;
+  }
+
+#ifdef TIER_INFER
+  if (token == 2) {
+    send_to_tier_llm(t_Wg, "W_g", layer);
+    send_to_tier_llm(t_Wu, "W_u", layer);
+    send_to_tier_llm(t_Wd, "W_d", layer);
+    send_to_tier_llm(t_Wq, "W_q", layer);
+    send_to_tier_llm(t_Wk, "W_k", layer);
+    send_to_tier_llm(t_Wv, "W_v", layer);
+    send_to_tier_llm(t_Wp, "W_p", layer);
   }
 #endif
 
-  template <typename T>
-  std::vector<at::Tensor> _forward(
-      std::vector<at::Tensor>& t_inp,
-      c10::intrusive_ptr<TppCache> t_cache,
-      bool use_cache) {
-    auto t_HS = t_inp[0];
-    RECORD_SCOPE(pt_op, {t_HS});
-    auto t_am = t_inp[1];
-    auto t_pid = t_inp[2];
-
-    #ifdef TIER_INFER
-
-      using Clock = std::chrono::high_resolution_clock;
-      using Microseconds = std::chrono::microseconds;
-      static uint64_t ffn_access_time_us = 0;  
-
-      // token and layer ID to be profiles
-      int profile_token = get_env_int("PROFILE_TOKEN", 2);
-      int profile_layer = get_env_int("PROFILE_LAYER", 20);
-
-      // Initialize the counter
-      auto counters = perf::CounterDefinition{};
-      auto event_counter = perf::EventCounter{ counters };
-
-      // Specify hardware events to count
-      event_counter.add({ 
-        "instructions",
-        "cycles",
-        "cache-misses",
-        "nanoseconds"
-      });
-
-      // Track of layer number being executed
-      static int total_layers = 0;
-      int token = 0;
-      // 32 for LLAMA-3 8B and 80 for LLAMA-3 70B
-      token = total_layers / 32;
-      token += 1;
-      total_layers += 1;
-      int layer = total_layers % 32;
-      if (layer == 0) {
-        layer = 32;
-      }
-
-      // Dump token and layer start time
-      std::ofstream outfile(
-          "/data/sathvik/tpp-pytorch-extension/log_files/token_layer_timestamps.log",
-          std::ios::app);
-      if (!outfile.is_open()) {
-        std::cerr
-            << "Error: Could not open token_layer_timestamps.log for appending!"
-            << std::endl;
-      }
-
-      long long timestamp = get_utc_time_diff_from_start();
-
-      outfile << "Token " << token << " ; Layer " << layer << " : " << timestamp
-              << " milliseconds" << std::endl;
-      outfile.close();
-    
-    #endif
-
-    // Weight loading phase
-    bool weight_reuse = check_weight_reuse(t_HS);
-
-    float scale = 1.0 / my_size;
-
-    auto t_Wq = this->t_Wq;
-    auto t_Wk = this->t_Wk;
-    auto t_Wv = this->t_Wv;
-    auto t_Wp = this->t_Wp;
-    auto t_Wg = this->t_Wg;
-    auto t_Wu = this->t_Wu;
-    auto t_Wd = this->t_Wd;
-
-    if (weight_reuse && TPP_CACHE_REMAPPED_WEIGHTS) {
-      if (!first_token_remapped)
-        remap_for_first_token<T>();
-
-      t_Wq = this->t_Wq_1;
-      t_Wk = this->t_Wk_1;
-      t_Wv = this->t_Wv_1;
-      t_Wp = this->t_Wp_1;
-      t_Wg = this->t_Wg_1;
-      t_Wu = this->t_Wu_1;
-      t_Wd = this->t_Wd_1;
-    }
-
-    
-      if(token == 2){
-        this->t_Wq_1 = at::Tensor();
-        this->t_Wk_1 = at::Tensor();
-        this->t_Wv_1 = at::Tensor();
-        this->t_Wp_1 = at::Tensor();
-        this->t_Wg_1 = at::Tensor();
-        this->t_Wu_1 = at::Tensor();
-        this->t_Wd_1 = at::Tensor();
-      }
-    #ifdef TIER_INFER
-      // Dump addr range of tensors to log file during start of decode phase (2nd
-      // token)
-      if (token == profile_token) {
-        profile_tensor(t_Wg, "W_g", layer);
-        profile_tensor(t_Wu, "W_u", layer);
-        profile_tensor(t_Wd, "W_d", layer);
-        profile_tensor(t_Wq, "W_q", layer);
-        profile_tensor(t_Wk, "W_k", layer);
-        profile_tensor(t_Wv, "W_v", layer);
-        profile_tensor(t_Wp, "W_p", layer);
-        profile_tensor(t_Gi, "W_Gi", layer);
-        profile_tensor(t_Gpa, "W_Gpa", layer);
-
-
-        // get_total_nbytes(t_Wg);
-        // get_total_nbytes(t_Wu);
-        // get_total_nbytes(t_Wd);
-        // get_total_nbytes(t_Wq);
-        // get_total_nbytes(t_Wk);
-        // get_total_nbytes(t_Wv);
-        // get_total_nbytes(t_Wp);
-        // get_total_nbytes(t_Gi);
-        // get_total_nbytes(t_Gpa);
-
-        if (layer == 32) {
-          const std::string& weights_log_file =
-              "/data/sathvik/tpp-pytorch-extension/tier_infer/log_files/llm_mem_region_migrate.log";
-          std::ofstream fout(weights_log_file, std::ios::app);
-          fout << std::endl;
-          fout << "Weight dump over" << std::endl;
-        }
-      }
-
-    #endif
-
-    // Execution of decoder layer
-
-    // RMS 1
-    auto t_null = t_HS.new_empty({0});
-    auto t_res = t_HS;
-    t_HS = llama_rms_norm<T>(t_HS, t_Gi, eps);
-
-    auto qkv_gemm = GemmCaller<T>(SCOPE_ARG(qkv_gemm));
-    auto proj_gemm = GemmCaller<T>(SCOPE_ARG(proj_gemm));
-    auto i_gemm = GemmCaller<T>(SCOPE_ARG(i_gemm));
-    auto o_gemm = GemmCaller<T>(SCOPE_ARG(o_gemm));
-
-    // QKV Computation
-    at::Tensor t_QL, t_KL, t_VL;
-    if (FUSED_QKV_GEMM == 0) {
-      t_QL = qkv_gemm(t_HS, t_Wq, t_null);
-      apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
-
-      t_KL = qkv_gemm(t_HS, t_Wk, t_null);
-      apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
-
-      t_VL = qkv_gemm(t_HS, t_Wv, t_null);
-    } else {
-      auto t_qkv_outs =
-          fused_qkv_gemm<T>(t_HS, {t_Wq, t_Wk, t_Wv}, {t_null, t_null, t_null});
-      t_QL = t_qkv_outs[0];
-      t_KL = t_qkv_outs[1];
-      t_VL = t_qkv_outs[2];
-      apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
-      apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
-    }
-
-    // MHA
-    #ifdef TIER_INFER
-      #ifdef PERF_CPP
-        event_counter.start();
-      #endif
-    #endif
-
-    auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
-    #ifdef TIER_INFER
-      #ifdef PERF_CPP
-        log_event_counter_results(event_counter, "MHA", token, layer);
-      #endif
-    #endif
-
-    auto t_CL = outputs[0];
-
-    // MHA-Residual
-    auto t_SO = proj_gemm(AddScalePostOp(t_res, scale), t_CL, t_Wp, t_null);
-
-    if (my_size > 1) {
-      allreduce(t_SO);
-    }
-
-    t_res = t_SO;
-
-    // RMS 2
-    t_HS = llama_rms_norm<T>(t_SO, t_Gpa, eps);
-
-    // FFN
-    #ifdef TIER_INFER
-      auto start_ffn = Clock::now();
-      #ifdef PERF_CPP
-        event_counter.start();
-      #endif 
-    #endif
-
-    auto t_I = i_gemm(SiluPostOp(), t_HS, t_Wg, t_null);
-    t_I = i_gemm(MulPostOp(t_I), t_HS, t_Wu, t_null);
-    #ifdef TIER_INFER
-      #ifdef PERF_CPP
-        log_event_counter_results(event_counter, "FFN", token, layer);
-      #endif 
-    #endif
-  
-    // FFN
-    #ifdef TIER_INFER
-      auto end_ffn = Clock::now();
-      ffn_access_time_us += std::chrono::duration_cast<Microseconds>(end_ffn - start_ffn).count();
-      std::ofstream latency_log("/data/sathvik/tpp-pytorch-extension/log_files/ffn_kernel_latency.log", std::ios::app);
-      layer = layer ? layer : 32;
-      if (latency_log.is_open()) {
-          latency_log << "Token " << token << ", Layer: " << layer
-                      << ", FFN kernel compute latency: " << ffn_access_time_us << " us\n";
-          latency_log.close();
-      } else {
-          std::cerr << "Failed to open KV cache access latency log file for writing.\n";
-      }
-      ffn_access_time_us = 0;  
-    #endif 
-
-    // FFN-Residual
-    auto t_Out = o_gemm(AddScalePostOp(t_res, scale), t_I, t_Wd, t_null);
-
-    if (my_size > 1) {
-      allreduce(t_Out);
-    }
-
-    outputs[0] = t_Out;
-
-    if (use_cache) {
-      return outputs;
-    } else {
-      return {t_Out};
+#ifdef DSA_SYNC
+  if(token==2){
+    global_dsa_ctx = NULL;
+    dsa_initialized = 0;
+    if (ensure_dsa_initialized(8) != 0) {
+        fprintf(stderr, "Failed to init DSA\n");
+        exit(1);
     }
   }
+#endif 
+
+  auto t_null = t_HS.new_empty({0});
+  auto t_res = t_HS;
+  t_HS = llama_rms_norm<T>(t_HS, t_Gi, eps);
+
+  auto qkv_gemm = GemmCaller<T>(SCOPE_ARG(qkv_gemm));
+  auto proj_gemm = GemmCaller<T>(SCOPE_ARG(proj_gemm));
+  auto i_gemm = GemmCaller<T>(SCOPE_ARG(i_gemm));
+  auto o_gemm = GemmCaller<T>(SCOPE_ARG(o_gemm));
+
+  // Log Wq access and compute Q
+  log_weight_access("t_Wq");
+  #ifdef DSA_SYNC
+   run_dsa_single(data_sizes_bytes[0], global_dsa_ctx);
+  #endif //DSA_SYNC
+  at::Tensor t_QL, t_KL, t_VL;
+  if (FUSED_QKV_GEMM == 0) {
+    t_QL = qkv_gemm(t_HS, t_Wq, t_null);
+    apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
+
+    // Log Wk access and compute K
+    log_weight_access("t_Wk");
+    t_KL = qkv_gemm(t_HS, t_Wk, t_null);
+    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
+
+    // Log Wv access and compute V
+    log_weight_access("t_Wv");
+    t_VL = qkv_gemm(t_HS, t_Wv, t_null);
+  } else {
+    // Log Wq, Wk, Wv accesses before fused gemm
+    log_weight_access("t_Wq");
+    log_weight_access("t_Wk");
+    log_weight_access("t_Wv");
+
+    auto t_qkv_outs =
+        fused_qkv_gemm<T>(t_HS, {t_Wq, t_Wk, t_Wv}, {t_null, t_null, t_null});
+    t_QL = t_qkv_outs[0];
+    t_KL = t_qkv_outs[1];
+    t_VL = t_qkv_outs[2];
+    apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
+    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
+  }
+
+#ifdef PERF_CPP
+  event_counter.start();
+#endif
+
+  auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+
+#ifdef PERF_CPP
+  log_event_counter_results(event_counter, "MHA", token, layer);
+#endif
+
+  auto t_CL = outputs[0];
+
+  // Log Wp access for MHA residual projection
+  log_weight_access("t_Wp");
+  #ifdef DSA_SYNC
+   run_dsa_single(data_sizes_bytes[1], global_dsa_ctx);
+  #endif //DSA_SYNC
+  auto t_SO = proj_gemm(AddScalePostOp(t_res, scale), t_CL, t_Wp, t_null);
+
+  if (my_size > 1) {
+    allreduce(t_SO);
+  }
+
+  t_res = t_SO;
+
+  t_HS = llama_rms_norm<T>(t_SO, t_Gpa, eps);
+
+  auto start_ffn = Clock::now();
+#ifdef PERF_CPP
+  event_counter.start();
+#endif
+
+  #ifdef DSA_SYNC
+   run_dsa_single(data_sizes_bytes[2], global_dsa_ctx);
+  #endif //DSA_SYNC
+  // Log Wg access for FFN
+  log_weight_access("t_Wg");
+  auto t_I = i_gemm(SiluPostOp(), t_HS, t_Wg, t_null);
+
+  // Log Wu access for FFN
+  log_weight_access("t_Wu");
+  t_I = i_gemm(MulPostOp(t_I), t_HS, t_Wu, t_null);
+
+#ifdef PERF_CPP
+  log_event_counter_results(event_counter, "FFN", token, layer);
+#endif
+
+#ifdef PERF_CPP
+  auto end_ffn = Clock::now();
+  ffn_access_time_us +=
+      std::chrono::duration_cast<Microseconds>(end_ffn - start_ffn).count();
+  std::ofstream latency_log(
+      "/data/sathvik/tpp-pytorch-extension/log_files/ffn_kernel_latency.log",
+      std::ios::app);
+  layer = layer ? layer : 32;
+  if (latency_log.is_open()) {
+    latency_log << "Token " << token << ", Layer: " << layer
+                << ", FFN kernel compute latency: " << ffn_access_time_us << " us\n";
+    latency_log.close();
+  } else {
+    std::cerr << "Failed to open KV cache access latency log file for writing.\n";
+  }
+  ffn_access_time_us = 0;
+#endif
+
+  // Log Wd access for FFN residual
+  log_weight_access("t_Wd");
+  #ifdef DSA_SYNC
+   run_dsa_single(data_sizes_bytes[3], global_dsa_ctx);
+  #endif //DSA_SYNC
+  auto t_Out = o_gemm(AddScalePostOp(t_res, scale), t_I, t_Wd, t_null);
+
+  if (my_size > 1) {
+    allreduce(t_Out);
+  }
+
+  outputs[0] = t_Out;
+
+  if (use_cache) {
+    return outputs;
+  } else {
+    return {t_Out};
+  }
+ }
 };
 
 struct __attribute__((visibility("hidden"))) Qwen2DecoderLayer : LLMBlock {

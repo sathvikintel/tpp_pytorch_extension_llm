@@ -1,0 +1,59 @@
+import sys
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+
+def plot_optimal_LKV_LW(T):
+    # Constants for LLAMA 3.1 8B (example values)
+    batch_size = 2
+    KV_HEADS = 16
+    HEAD_SIZE = 64
+    BF_1_size_GB = 0.00000048828125  # 0.5 MB in GB
+
+    A_model = 2 * batch_size * KV_HEADS * HEAD_SIZE * BF_1_size_GB
+    B_model = 0.4
+    FAST_MEM_SIZE = 15
+
+    BW_fast = 400  # example bandwidth GB/s
+    BW_slow = 100  # example bandwidth GB/s
+
+    # Range of t from 1 to T
+    t = np.linspace(1, T, 400)
+
+    # Calculate feasible L_KV bounds
+    LKV_lower_bound = np.maximum(0, (FAST_MEM_SIZE - 32 * B_model) / (A_model * t))
+    LKV_upper_bound = np.minimum(32, FAST_MEM_SIZE / (A_model * t))
+
+    # Optimal L_KV is the lower bound to minimize denominator
+    LKV_opt = LKV_lower_bound
+
+    # Calculate corresponding L_W from equality constraint
+    LW_opt = (FAST_MEM_SIZE - A_model * LKV_opt * t) / B_model
+
+    # Clip L_W and LKV to [0, 32]
+    LW_opt = np.clip(LW_opt, 0, 32)
+    LKV_opt = np.clip(LKV_opt, 0, 32)
+
+    sns.set(style='whitegrid', context='talk')
+    plt.figure(figsize=(12, 7))
+    plt.plot(t, LKV_opt, label='$L_{KV}$ (optimal)', linewidth=3)
+    plt.plot(t, LW_opt, label='$L_{W}$ (optimal)', linewidth=3)
+    plt.xlabel('t')
+    plt.ylabel('Memory Allocation (GB)')
+    plt.title('Optimal $L_{KV}$ and $L_{W}$ vs $t$')
+    plt.legend()
+    plt.tight_layout()
+
+    filename = f'optimal_LKV_LW_t_up_to_{int(T)}.png'
+    plt.savefig(filename, dpi=300)
+    plt.close()
+    print(f"Saved plot to: {os.path.abspath(filename)}")
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print('Usage: python optimal_memory_alloc.py <T>')
+        sys.exit(1)
+    T = float(sys.argv[1])
+    plot_optimal_LKV_LW(T)
+

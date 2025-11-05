@@ -8,6 +8,8 @@ import inspect
 from accelerate import init_empty_weights
 from typing import Tuple
 import hashlib
+import ctypes
+import threading
 
 os.environ["CURL_CA_BUNDLE"] = ""
 os.environ["REQUESTS_CA_BUNDLE"] = ""
@@ -169,11 +171,15 @@ orig_print = print
 from collections import namedtuple
 
 # Define a global structure
-ParameterInfo = namedtuple('ParameterInfo', ['name', 'address', 'shape', 'trainable', 'dtype', 'size_gb'])
+ParameterInfo = namedtuple(
+    "ParameterInfo", ["name", "address", "shape", "trainable", "dtype", "size_gb"]
+)
 global_param_addresses = []
 
 
-def print_model_parameters_and_store_addresses(model, log_file="log_files/llama_weight_params_info.log"):
+def print_model_parameters_and_store_addresses(
+    model, log_file="log_files/llama_weight_params_info.log"
+):
     from prettytable import PrettyTable
 
     GB_DIV = 1024**3  # Number of bytes in a GB
@@ -196,17 +202,26 @@ def print_model_parameters_and_store_addresses(model, log_file="log_files/llama_
         address = param.data_ptr()
 
         # Store all info in the global structure
-        global_param_addresses.append(ParameterInfo(
-            name, address, list(param.shape), param.requires_grad, str(param.dtype).replace("torch.", ""), size_gb
-        ))
+        global_param_addresses.append(
+            ParameterInfo(
+                name,
+                address,
+                list(param.shape),
+                param.requires_grad,
+                str(param.dtype).replace("torch.", ""),
+                size_gb,
+            )
+        )
 
-        table.add_row([
-            name,
-            list(param.shape),
-            param.requires_grad,
-            str(param.dtype).replace("torch.", ""),
-            f"{size_gb:.4f}",
-        ])
+        table.add_row(
+            [
+                name,
+                list(param.shape),
+                param.requires_grad,
+                str(param.dtype).replace("torch.", ""),
+                f"{size_gb:.4f}",
+            ]
+        )
 
         total_params += param_count
         total_size_bytes += size_bytes
@@ -224,8 +239,6 @@ def print_model_parameters_and_store_addresses(model, log_file="log_files/llama_
 
     with open(log_file, "w") as f:
         f.write(output)
-
-
 
 
 def print_rank0(*args, **kwargs):
@@ -280,6 +293,95 @@ tokenizer = model_class[1].from_pretrained(args.model_id)
 if not args.load_sharded_model:
     model = model.eval().to(device)
 model = model.to(memory_format=torch.channels_last)
+
+
+LIB_PATH = "/data/sathvik/tpp-pytorch-extension/tier_infer/"
+
+# Load shared libraries
+lib_shared = ctypes.CDLL(os.path.join(LIB_PATH, "libn_l_hbm_shared.so"))
+lib_dynamic_partition = ctypes.CDLL(
+    os.path.join(LIB_PATH, "lib_tier_llm_dynamic_partition.so")
+)
+lib_inter_layer = ctypes.CDLL(os.path.join(LIB_PATH, "lib_tier_llm_inter_layer.so"))
+
+# Structure for arguments, must match your C struct
+class TierInferArgs(ctypes.Structure):
+    _fields_ = [("argc", ctypes.c_int), ("argv", ctypes.POINTER(ctypes.c_char_p))]
+
+
+######## First: Dynamic Partition Thread ########
+argv_dyn = [
+    b"dynamic_partition_thread",  # argv[0]
+    b"dummy.log",  # argv[1]
+    b"/data/sathvik/tpp-pytorch-extension/tier_infer_main_config.cfg",  # argv[2]
+    b"dummy.log",  # argv[3]
+    b"dummy.log",  # argv[4]
+    b"dummy.log",  # argv[5]
+]
+argc_dyn = len(argv_dyn)
+argv_dyn_ctype = (ctypes.c_char_p * argc_dyn)(*argv_dyn)
+args_dyn = TierInferArgs(argc_dyn, argv_dyn_ctype)
+
+# Set argument and return types for dynamic partition thread
+lib_dynamic_partition.tier_infer_thread.argtypes = [ctypes.c_void_p]
+lib_dynamic_partition.tier_infer_thread.restype = ctypes.c_void_p
+
+
+def dynamic_partition_thread_entry():
+    lib_dynamic_partition.tier_infer_thread(ctypes.byref(args_dyn))
+
+
+# Launch dynamic partition thread **first**
+dyn_thread = threading.Thread(target=dynamic_partition_thread_entry, daemon=True)
+dyn_thread.start()
+
+######## Second: Inter Layer Tier Thread ########
+# Wait for dynamic partition thread initialization (adjust sleep as needed)
+# time.sleep(2)
+
+# Convert numeric args to str then to bytes
+context_len = str(int(args.input_tokens) + int(args.max_new_tokens)).encode("utf-8")
+input_tokens_bytes = (
+    str(args.input_tokens).encode("utf-8")
+    if isinstance(args.input_tokens, int)
+    else args.input_tokens.encode("utf-8")
+)
+batch_size_bytes = (
+    str(args.batch_size).encode("utf-8")
+    if isinstance(args.batch_size, int)
+    else args.batch_size.encode("utf-8")
+)
+
+argv_inter = [
+    b"tier_inter_layer_thread",  # argv[0]
+    b"12345",  # argv[1]: llm_pid
+    b"dummy.log",  # argv[2]: migration_log_file
+    b"dummy.log",  # argv[3]: hbm_state_log_file
+    b"1",  # argv[4]: num_threads
+    b"dummy.log",  # argv[5]: L_N_HBM_log_file
+    b"0",  # argv[6]: L_min_HBM or unused placeholder
+    context_len,  # argv[7]: context_length
+    input_tokens_bytes,  # argv[8]: input_token_length
+    batch_size_bytes,  # argv[9]: batch_size
+    b"dummy.log",  # argv[10]: token_ts_file
+]
+argc_inter = len(argv_inter)
+argv_inter_ctype = (ctypes.c_char_p * argc_inter)(*argv_inter)
+args_inter = TierInferArgs(argc_inter, argv_inter_ctype)
+
+# Set argument and return types for inter layer thread
+lib_inter_layer.tier_infer_thread.argtypes = [ctypes.c_void_p]
+lib_inter_layer.tier_infer_thread.restype = ctypes.c_void_p
+
+
+def inter_layer_thread_entry():
+    lib_inter_layer.tier_infer_thread(ctypes.byref(args_inter))
+
+
+# Launch inter layer thread SECOND
+inter_thread = threading.Thread(target=inter_layer_thread_entry, daemon=True)
+inter_thread.start()
+
 
 # print_model_parameters(model)
 
@@ -471,7 +573,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
     enabled=amp_enabled,
     dtype=amp_dtype if amp_enabled else None,
 ):
-    
+
     for i in range(num_iter):
         print(f"Iteration number: {i+1}, total_time = {total_time} ")
         tic = time.time()
@@ -483,10 +585,12 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         max_seq_len = int(args.input_tokens) + int(args.max_new_tokens)
 
         output = model.generate(
-            **inputs,
-            max_new_tokens=args.max_new_tokens,
-            **generate_kwargs
+            **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
         )
+
+        lib_inter_layer.tier_infer_signal_stop.argtypes = []
+        lib_inter_layer.tier_infer_signal_stop.restype = None
+        lib_inter_layer.tier_infer_signal_stop()
 
         if output_past_key_values == True:
             output, pkv = output
