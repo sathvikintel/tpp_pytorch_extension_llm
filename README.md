@@ -128,7 +128,7 @@ Pass relevant tensor to `send_to_tier_llm()`
 
 ## Disabling TierInfer
 
-To disable TierInfer profiling/inference threads, comment out the following lines in examples/llm/run_generation.py:
+To disable TierInfer profiling/inference threads, comment out the following lines in `examples/llm/run_generation.py`:
 
 ```python 
 dyn_thread.start()
