@@ -8,7 +8,9 @@ This guide walks through the steps to set up Intel TPP with TierInfer and run th
 
 Clone the repository including submodules:
 
-`git clone --recurse-submodules https://github.com/sathvikintel/tpp_pytorch_extension_llm.git`
+```
+git clone --recurse-submodules https://github.com/sathvikintel/tpp_pytorch_extension_llm.git
+```
 
 ---
 
@@ -16,7 +18,9 @@ Clone the repository including submodules:
 
 1. Change directory:
 
-`cd tpp_pytorch_extension_llm`
+```
+cd tpp_pytorch_extension_llm
+```
 
 2. Setup Conda environment:
 
@@ -30,17 +34,22 @@ source env.sh
 
 1. Navigate to utils directory:
 
-`cd utils/`
+```
+cd utils/
+```
 
 2. Install Torch Collective Communications Library (CCL):
 
-`bash install_torch_ccl.sh`
+```bash install_torch_ccl.sh
+```
 
 Note: Ensure your cmake version in torch-ccl/third_party/oneCCL/CMakeLists.txt is at least 3.5.
 
 3. Return to root directory:
 
-`cd ..`
+```
+cd ..
+```
 
 ---
 
@@ -48,7 +57,9 @@ Note: Ensure your cmake version in torch-ccl/third_party/oneCCL/CMakeLists.txt i
 
 1. Install the Python package:
 
-`python setup.py install`
+```
+python setup.py install
+```
 
 2. Install example dependencies:
 
@@ -64,21 +75,29 @@ cd ../../
 
 1. Change directory to tier_infer:
 
-`cd tier_infer/`
+```
+cd tier_infer/
+```
 
 2. Build with make:
 
-`make`
+```
+make
+```
 
 3. Return to root directory:
 
-`cd ..`
+```
+cd ..
+```
 
 ---
 
 ## Update LD_LIBRARY_PATH
 
-`export LD_LIBRARY_PATH=$LD_PRELOAD:$pwd/tier_infer/`
+```
+export LD_LIBRARY_PATH=$LD_PRELOAD:$pwd/tier_infer/
+```
 
 ---
 
@@ -92,7 +111,9 @@ Control number of thread using  `OMP_NUM_THREADS` and KV cache allocation granul
 
 Run the example workload:
 
-`python -u examples/llm/run_generation.py -m meta-llama/Meta-Llama-3-70B --use-tpp --token --batch-size 1 --dist-backend ccl --max 32 --input 128 --greedy --num-warmup 0 --num-iter 1 --summary-file summary.log`
+```
+python -u examples/llm/run_generation.py -m meta-llama/Meta-Llama-3-70B --use-tpp --token --batch-size 1 --dist-backend ccl --max 32 --input 128 --greedy --num-warmup 0 --num-iter 1 --summary-file summary.log
+```
 
 ---
 
@@ -108,7 +129,9 @@ Pass relevant tensor to `send_to_tier_llm()`
 
 To disable TierInfer profiling/inference threads, comment out the following lines in examples/llm/run_generation.py:
 
-`dyn_thread.start()`
-`inter_thread.start()`
+```python 
+dyn_thread.start()
+inter_thread.start()
+```
 
 ---
