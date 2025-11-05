@@ -40,7 +40,8 @@ cd utils/
 
 2. Install Torch Collective Communications Library (CCL):
 
-```bash install_torch_ccl.sh
+```
+bash install_torch_ccl.sh
 ```
 
 Note: Ensure your cmake version in torch-ccl/third_party/oneCCL/CMakeLists.txt is at least 3.5.
