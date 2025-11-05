@@ -4,3 +4,6 @@
 [submodule "parlooper"]
 	path = parlooper
 	url = https://github.com/libxsmm/parlooper.git
+[submodule "tier_infer"]
+	path = tier_infer
+	url = https://github.com/sathvikintel/tier_infer.git
