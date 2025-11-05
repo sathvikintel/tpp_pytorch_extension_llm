@@ -38,7 +38,7 @@ using namespace tpp;
 
 #define TIER_INFER
 // #define PERF_CPP
-#define DSA_SYNC
+// #define DSA_SYNC
 
 #ifdef TIER_INFER
 #include <pthread.h>
@@ -56,8 +56,11 @@ using namespace tpp;
 
 #include <numa.h>
 #include <numaif.h>
-#include "/data/sandeep/dsa_work/micro_benchmarks/library_move_pages/include/move_page_dsa.h"
 #endif
+
+#ifdef DSA_SYNC
+#include "/data/sandeep/dsa_work/micro_benchmarks/library_move_pages/include/move_page_dsa.h"
+#endif 
 
 #ifdef TIER_INFER
 extern "C" {

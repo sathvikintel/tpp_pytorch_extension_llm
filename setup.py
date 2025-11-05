@@ -144,8 +144,8 @@ extra_link_args = [
     "-lpthread",
     "-lnuma",
     "-flto",
-    "-L/data/sandeep/dsa_work/micro_benchmarks/library_move_pages",
-    "-lmove_page_dsa"
+    # "-L/data/sandeep/dsa_work/micro_benchmarks/library_move_pages",
+    # "-lmove_page_dsa"
 ]
 
 print("extra_compile_args = ", extra_compile_args)
@@ -202,8 +202,9 @@ setup(
                 perf_cpp_lib,
                 "/data/sathvik/tpp-pytorch-extension/tier_infer/lib_tier_llm_dynamic_partition.so",
             ],
-            libraries=["pthread", "numa", "move_page_dsa"],
-            library_dirs=["/data/sandeep/dsa_work/micro_benchmarks/library_move_pages"],
+            # libraries=["pthread", "numa", "move_page_dsa"],
+            libraries=["pthread", "numa"],
+            # library_dirs=["/data/sandeep/dsa_work/micro_benchmarks/library_move_pages"],
             runtime_library_dirs=["/data/sathvik/tpp-pytorch-extension/tier_infer"],
             extra_link_args=extra_link_args,
         )
