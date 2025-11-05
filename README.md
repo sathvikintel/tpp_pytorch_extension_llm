@@ -30,7 +30,7 @@ source env.sh
 ```
 ---
 
-## Install Torch CCL
+## Install Torch CCL (for distributed node compute)
 
 1. Navigate to utils directory:
 
