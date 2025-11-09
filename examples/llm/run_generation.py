@@ -295,7 +295,7 @@ if not args.load_sharded_model:
 model = model.to(memory_format=torch.channels_last)
 
 
-LIB_PATH = "/data/sathvik/tpp-pytorch-extension/tier_infer/"
+LIB_PATH = "tier_infer/"
 
 # Load shared libraries
 lib_shared = ctypes.CDLL(os.path.join(LIB_PATH, "libn_l_hbm_shared.so"))
@@ -313,7 +313,7 @@ class TierInferArgs(ctypes.Structure):
 argv_dyn = [
     b"dynamic_partition_thread",  # argv[0]
     b"dummy.log",  # argv[1]
-    b"/data/sathvik/tpp-pytorch-extension/tier_infer_main_config.cfg",  # argv[2]
+    b"tier_infer_main_config.cfg",  # argv[2]
     b"dummy.log",  # argv[3]
     b"dummy.log",  # argv[4]
     b"dummy.log",  # argv[5]
