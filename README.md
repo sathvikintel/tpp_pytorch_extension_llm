@@ -109,7 +109,7 @@ python setup.py install
 ## Update LD_LIBRARY_PATH
 
 ```
-export LD_LIBRARY_PATH=$LD_PRELOAD:$pwd/tier_infer/
+export LD_LIBRARY_PATH=$LD_PRELOAD:$(pwd)/tier_infer/
 ```
 
 ---
