@@ -37,10 +37,10 @@ parlooper_makefile = os.path.join(parlooper_root, "Makefile")
 parlooper_include = os.path.join(parlooper_root, "include")
 parlooper_lib = os.path.join(parlooper_root, "lib")
 
-# --- perf-cpp setup ---
-perf_cpp_include = "/home/sathvik/perf-cpp/include"
-perf_cpp_lib = "/home/sathvik/perf-cpp/build/libperf-cpp.a"
-# ----------------------
+# # --- perf-cpp setup ---
+# perf_cpp_include = "/home/sathvik/perf-cpp/include"
+# perf_cpp_lib = "/home/sathvik/perf-cpp/build/libperf-cpp.a"
+# # ----------------------
 
 if not os.path.exists(xsmm_makefile):
     raise IOError(
@@ -196,11 +196,11 @@ setup(
                 parlooper_include,
                 os.path.join(cwd, "src/csrc"),
                 os.path.join(cwd, "src/csrc/llm"),  # include headers in llm
-                perf_cpp_include,
+                # perf_cpp_include,
             ],
             extra_objects=[
-                perf_cpp_lib,
-                "/data/sathvik/tpp-pytorch-extension/tier_infer/lib_tier_llm_dynamic_partition.so",
+                # perf_cpp_lib,
+                # "tier_infer/lib_tier_llm_dynamic_partition.so",
             ],
             # libraries=["pthread", "numa", "move_page_dsa"],
             libraries=["pthread", "numa"],

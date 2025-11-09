@@ -44,7 +44,7 @@ cd utils/
 bash install_torch_ccl.sh
 ```
 
-Note: Ensure your cmake version in torch-ccl/third_party/oneCCL/CMakeLists.txt is at least 3.5.
+Note: Ensure your cmake version in `torch-ccl/third_party/oneCCL/CMakeLists.txt` is at least **3.5**.
 
 3. Return to root directory:
 
@@ -92,6 +92,18 @@ make
 cd ..
 ```
 
+---
+
+## Rebuild Intel TPP
+
+1. Uncomment `tier_infer/lib_tier_llm_dynamic_partition.so` in `setup.py`
+
+2. Reuild Intel TPP
+
+```
+python setup.py install
+```
+ 
 ---
 
 ## Update LD_LIBRARY_PATH

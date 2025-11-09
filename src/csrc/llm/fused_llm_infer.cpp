@@ -1436,33 +1436,33 @@ std::vector<at::Tensor> _forward(
   g_timing_info_var.write(item);
   pthread_mutex_unlock(&g_shared_ts_state_mutex);
 
-  std::ofstream outfile_ts(
-      "/data/sathvik/tpp-pytorch-extension/log_files/token_layer_timestamps.log",
-      std::ios::app);
-  if (outfile_ts.is_open()) {
-    outfile_ts << "Token " << token << " ; Layer " << layer << " : "
-               << timestamp << " milliseconds" << std::endl;
-    outfile_ts.close();
-  } else {
-    std::cerr << "Error: Could not open token_layer_timestamps.log for appending!\n";
-  }
+  // std::ofstream outfile_ts(
+  //     "/data/sathvik/tpp-pytorch-extension/log_files/token_layer_timestamps.log",
+  //     std::ios::app);
+  // if (outfile_ts.is_open()) {
+  //   outfile_ts << "Token " << token << " ; Layer " << layer << " : "
+  //              << timestamp << " milliseconds" << std::endl;
+  //   outfile_ts.close();
+  // } else {
+  //   std::cerr << "Error: Could not open token_layer_timestamps.log for appending!\n";
+  // }
 
 #endif
 
-  // Helper lambda to log timestamped weight access
-  auto log_weight_access = [](const std::string& weight_name) {
-    auto now = Clock::now();
-    auto time_us =
-        std::chrono::duration_cast<Microseconds>(now.time_since_epoch()).count();
-    std::ofstream log_file(
-        "/data/sathvik/tpp-pytorch-extension/access_times.log", std::ios::app);
-    if (log_file.is_open()) {
-      log_file << weight_name << " accessed at " << time_us << " us\n";
-      log_file.close();
-    } else {
-      std::cerr << "Failed to open access_times.log for writing.\n";
-    }
-  };
+  //   // Helper lambda to log timestamped weight access
+  // auto log_weight_access = [](const std::string& weight_name) {
+  //   auto now = Clock::now();
+  //   auto time_us =
+  //       std::chrono::duration_cast<Microseconds>(now.time_since_epoch()).count();
+  //   std::ofstream log_file(
+  //       "/data/sathvik/tpp-pytorch-extension/access_times.log", std::ios::app);
+  //   if (log_file.is_open()) {
+  //     log_file << weight_name << " accessed at " << time_us << " us\n";
+  //     log_file.close();
+  //   } else {
+  //     std::cerr << "Failed to open access_times.log for writing.\n";
+  //   }
+  // };
 
   bool weight_reuse = check_weight_reuse(t_HS);
   float scale = 1.0 / my_size;
@@ -1521,7 +1521,7 @@ std::vector<at::Tensor> _forward(
   auto o_gemm = GemmCaller<T>(SCOPE_ARG(o_gemm));
 
   // Log Wq access and compute Q
-  log_weight_access("t_Wq");
+  // log_weight_access("t_Wq");
   #ifdef DSA_SYNC
    run_dsa_single(data_sizes_bytes[0], global_dsa_ctx);
   #endif //DSA_SYNC
@@ -1531,18 +1531,18 @@ std::vector<at::Tensor> _forward(
     apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
 
     // Log Wk access and compute K
-    log_weight_access("t_Wk");
+    // log_weight_access("t_Wk");
     t_KL = qkv_gemm(t_HS, t_Wk, t_null);
     apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
 
     // Log Wv access and compute V
-    log_weight_access("t_Wv");
+    // log_weight_access("t_Wv");
     t_VL = qkv_gemm(t_HS, t_Wv, t_null);
   } else {
     // Log Wq, Wk, Wv accesses before fused gemm
-    log_weight_access("t_Wq");
-    log_weight_access("t_Wk");
-    log_weight_access("t_Wv");
+    // log_weight_access("t_Wq");
+    // log_weight_access("t_Wk");
+    // log_weight_access("t_Wv");
 
     auto t_qkv_outs =
         fused_qkv_gemm<T>(t_HS, {t_Wq, t_Wk, t_Wv}, {t_null, t_null, t_null});
@@ -1566,7 +1566,7 @@ std::vector<at::Tensor> _forward(
   auto t_CL = outputs[0];
 
   // Log Wp access for MHA residual projection
-  log_weight_access("t_Wp");
+  // log_weight_access("t_Wp");
   #ifdef DSA_SYNC
    run_dsa_single(data_sizes_bytes[1], global_dsa_ctx);
   #endif //DSA_SYNC
@@ -1588,12 +1588,12 @@ std::vector<at::Tensor> _forward(
   #ifdef DSA_SYNC
    run_dsa_single(data_sizes_bytes[2], global_dsa_ctx);
   #endif //DSA_SYNC
-  // Log Wg access for FFN
-  log_weight_access("t_Wg");
+  // // Log Wg access for FFN
+  // log_weight_access("t_Wg");
   auto t_I = i_gemm(SiluPostOp(), t_HS, t_Wg, t_null);
 
-  // Log Wu access for FFN
-  log_weight_access("t_Wu");
+  // // Log Wu access for FFN
+  // log_weight_access("t_Wu");
   t_I = i_gemm(MulPostOp(t_I), t_HS, t_Wu, t_null);
 
 #ifdef PERF_CPP
@@ -1618,8 +1618,8 @@ std::vector<at::Tensor> _forward(
   ffn_access_time_us = 0;
 #endif
 
-  // Log Wd access for FFN residual
-  log_weight_access("t_Wd");
+  // // Log Wd access for FFN residual
+  // log_weight_access("t_Wd");
   #ifdef DSA_SYNC
    run_dsa_single(data_sizes_bytes[3], global_dsa_ctx);
   #endif //DSA_SYNC
