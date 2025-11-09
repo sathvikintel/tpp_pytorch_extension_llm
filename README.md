@@ -125,7 +125,7 @@ Control number of thread using  `OMP_NUM_THREADS` and KV cache allocation granul
 Run the example workload:
 
 ```
-python -u examples/llm/run_generation.py -m meta-llama/Meta-Llama-3-70B --use-tpp --token --batch-size 1 --dist-backend ccl --max 32 --input 128 --greedy --num-warmup 0 --num-iter 1 --summary-file summary.log
+python -u examples/llm/run_generation.py -m meta-llama/Meta-Llama-3-8B --use-tpp --token --batch-size 1 --dist-backend ccl --max 32 --input 128 --greedy --num-warmup 0 --num-iter 1 --summary-file summary.log
 ```
 
 ---
