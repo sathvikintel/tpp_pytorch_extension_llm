@@ -295,6 +295,9 @@ if not args.load_sharded_model:
 model = model.to(memory_format=torch.channels_last)
 
 
+
+
+##################### TIER INFER CHANGES #####################
 LIB_PATH = "tier_infer/"
 
 # Load shared libraries
@@ -382,6 +385,7 @@ def inter_layer_thread_entry():
 inter_thread = threading.Thread(target=inter_layer_thread_entry, daemon=True)
 inter_thread.start()
 
+##################### TIER INFER CHANGES #####################
 
 # print_model_parameters(model)
 

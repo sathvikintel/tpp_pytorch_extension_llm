@@ -120,6 +120,15 @@ Control number of thread using  `OMP_NUM_THREADS` and KV cache allocation granul
 
 ---
 
+
+## Login to huggingface to access LLAMA-3-8B
+
+```
+huggingface-cli login
+```
+
+---
+
 ## Run Workload
 
 Run the example workload:
